@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------
-# Aplicação de Watchlist (Letterboxd)
-# Importa o CSV exportado do Letterboxd, mostra os filmes numa tabela
-# (com pesquisa, filtros e ordenação) e sorteia um filme à sorte.
+# BoxdList Application (Letterboxd)
+# Imports an exported Letterboxd CSV file, displays movies in a table
+# (with search, filtering, and sorting), and picks a random movie.
 # ---------------------------------------------------------------
 
 import csv
@@ -14,385 +14,386 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-# ---------- Constantes ----------
-# (id interno, título do cabeçalho, largura em pixels)
-COLUNAS = (("nome", "Filme", 440),
-           ("ano", "Ano", 70),
-           ("data", "Adicionado", 110))
-OBRIGATORIAS = {"Date", "Name", "Year", "Letterboxd URI"}
-FICHEIRO_CONFIG = Path.home() / ".watchlist_config.json"
-ATRASO_PESQUISA_MS = 200   # espera depois da última tecla antes de filtrar
-SEM_FILTRO = "Todas"
-VAZIO = "—"             # mostrado na tabela quando falta um dado
-ANO_VALIDO = re.compile(r"\d{4}")
-DATA_VALIDA = re.compile(r"\d{4}-\d{2}-\d{2}")
+# ---------- Constants ----------
+# (internal id, header title, width in pixels)
+COLUMNS = (("name", "Movie", 440),
+           ("year", "Year", 70),
+           ("date", "Added", 110))
+MANDATORY = {"Date", "Name", "Year", "Letterboxd URI"}
+CONFIG_FILE = Path.home() / ".watchlist_config.json"
+SEARCH_DELAY_MS = 200  # wait after the last keypress before filtering
+NO_FILTER = "All"
+EMPTY = "—"            # shown in the table when data is missing
+VALID_YEAR = re.compile(r"\d{4}")
+VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-# ---------- Lógica (funções puras, fáceis de testar) ----------
-def normalizar(texto: str) -> str:
-    """Minúsculas e sem acentos: 'Amélie' -> 'amelie'."""
-    decomposto = unicodedata.normalize("NFD", texto.lower())
-    return "".join(c for c in decomposto if not unicodedata.combining(c))
+# ---------- Logic (pure functions, easy to test) ----------
+def normalize(text: str) -> str:
+    """Lowercase and accent-insensitive: 'Amélie' -> 'amelie'."""
+    decomposed = unicodedata.normalize("NFD", text.lower())
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
 
 
-def carregar_filmes(caminho: str) -> tuple[list[dict], int]:
-    """Lê o CSV e devolve (filmes, linhas_ignoradas).
+def load_movies(path: str) -> tuple[list[dict], int]:
+    """Reads the CSV and returns (movies, ignored_lines).
 
-    Ignora linhas sem nome ou com colunas a mais (não dá para saber a que
-    campo pertence cada valor). Anos, datas e links inválidos ficam vazios.
+    Ignores rows without a name or with extra columns (cannot determine
+    which field each value belongs to). Invalid years, dates, and links
+    are left blank.
     """
-    filmes = []
-    ignoradas = 0
-    # utf-8-sig remove o BOM; newline="" é a forma recomendada para CSVs
-    with open(caminho, newline="", encoding="utf-8-sig") as f:
-        leitor = csv.DictReader(f)
+    movies = []
+    ignored = 0
+    # utf-8-sig removes the BOM; newline="" is the recommended way for CSVs
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
 
-        if not leitor.fieldnames or not OBRIGATORIAS.issubset(leitor.fieldnames):
+        if not reader.fieldnames or not MANDATORY.issubset(reader.fieldnames):
             raise ValueError(
-                "O ficheiro não parece ser uma watchlist do Letterboxd.\n"
-                "Colunas esperadas: Date, Name, Year, Letterboxd URI")
+                "The file does not appear to be a Letterboxd watchlist.\n"
+                "Expected columns: Date, Name, Year, Letterboxd URI")
 
-        for linha in leitor:
-            # Colunas a mais: o csv guarda-as sob a chave None
-            if None in linha:
-                ignoradas += 1
+        for row in reader:
+            # Extra columns: csv stores them under the key None
+            if None in row:
+                ignored += 1
                 continue
 
-            nome = (linha.get("Name") or "").strip()
-            if not nome:
-                # linhas totalmente em branco não contam como erro
-                if any((v or "").strip() for v in linha.values()):
-                    ignoradas += 1
+            name = (row.get("Name") or "").strip()
+            if not name:
+                # completely blank lines do not count as errors
+                if any((v or "").strip() for v in row.values()):
+                    ignored += 1
                 continue
 
-            ano = (linha.get("Year") or "").strip()
-            data = (linha.get("Date") or "").strip()
-            url = (linha.get("Letterboxd URI") or "").strip()
-            filmes.append({
-                "nome": nome,
-                "ano": ano if ANO_VALIDO.fullmatch(ano) else "",
-                "data": data if DATA_VALIDA.fullmatch(data) else "",
+            year = (row.get("Year") or "").strip()
+            date = (row.get("Date") or "").strip()
+            url = (row.get("Letterboxd URI") or "").strip()
+            movies.append({
+                "name": name,
+                "year": year if VALID_YEAR.fullmatch(year) else "",
+                "date": date if VALID_DATE.fullmatch(date) else "",
                 "url": url if url.startswith("http") else "",
             })
-    return filmes, ignoradas
+    return movies, ignored
 
 
-def esta_incompleto(filme: dict) -> bool:
-    """True se faltar o ano, a data ou o link."""
-    return not (filme["ano"] and filme["data"] and filme["url"])
+def is_incomplete(movie: dict) -> bool:
+    """True if year, date, or link is missing."""
+    return not (movie["year"] and movie["date"] and movie["url"])
 
 
-def ano_como_int(valor: str) -> int | None:
-    """Converte um ano em texto para int; devolve None se não for válido."""
-    valor = valor.strip()
-    return int(valor) if valor.isdigit() else None
+def year_as_int(value: str) -> int | None:
+    """Converts a year string to int; returns None if invalid."""
+    value = value.strip()
+    return int(value) if value.isdigit() else None
 
 
-def filtrar(filmes: list[dict], termo: str,
-            ano_min: int | None, ano_max: int | None) -> list[dict]:
-    """Filtra por nome (sem acentos/maiúsculas) e por intervalo de anos."""
-    termo = normalizar(termo.strip())
-    resultado = []
-    for f in filmes:
-        if termo and termo not in normalizar(f["nome"]):
+def filter_movies(movies: list[dict], term: str,
+                  year_min: int | None, year_max: int | None) -> list[dict]:
+    """Filters by name (accent/case-insensitive) and year range."""
+    term = normalize(term.strip())
+    result = []
+    for f in movies:
+        if term and term not in normalize(f["name"]):
             continue
-        if ano_min is not None or ano_max is not None:
-            ano = ano_como_int(f["ano"])
-            if ano is None:
+        if year_min is not None or year_max is not None:
+            year = year_as_int(f["year"])
+            if year is None:
                 continue
-            if ano_min is not None and ano < ano_min:
+            if year_min is not None and year < year_min:
                 continue
-            if ano_max is not None and ano > ano_max:
+            if year_max is not None and year > year_max:
                 continue
-        resultado.append(f)
-    return resultado
+        result.append(f)
+    return result
 
 
-def ordenar_filmes(filmes: list[dict], coluna: str | None,
-                   inversa: bool) -> list[dict]:
-    """Devolve uma cópia ordenada; a lista original não é alterada."""
-    if coluna is None:
-        return list(filmes)
+def sort_movies(movies: list[dict], column: str | None,
+                reverse: bool) -> list[dict]:
+    """Returns a sorted copy; the original list is not modified."""
+    if column is None:
+        return list(movies)
 
-    def chave(f: dict):
-        valor = f[coluna]
-        if coluna == "ano":
-            return ano_como_int(valor) or 0   # anos vazios ficam no início
-        if coluna == "nome":
-            return normalizar(valor)
-        return valor.lower()                  # datas AAAA-MM-DD ordenam como texto
+    def key(f: dict):
+        value = f[column]
+        if column == "year":
+            return year_as_int(value) or 0  # empty years stay at the top
+        if column == "name":
+            return normalize(value)
+        return value.lower()                # YYYY-MM-DD dates sort as text
 
-    return sorted(filmes, key=chave, reverse=inversa)
-
-
-def escolher_aleatorio(filmes: list[dict], ultimo: dict | None) -> dict:
-    """Escolhe um filme à sorte, evitando repetir o último (se possível)."""
-    candidatos = [f for f in filmes if f is not ultimo]
-    return random.choice(candidatos or filmes)
+    return sorted(movies, key=key, reverse=reverse)
 
 
-# ---------- Configuração (lembrar o último CSV) ----------
-def ler_ultimo_caminho() -> str | None:
+def pick_random(movies: list[dict], last: dict | None) -> dict:
+    """Picks a random movie, avoiding repeating the last one (if possible)."""
+    candidates = [f for f in movies if f is not last]
+    return random.choice(candidates or movies)
+
+
+# ---------- Configuration (remember the last CSV) ----------
+def read_last_path() -> str | None:
     try:
-        dados = json.loads(FICHEIRO_CONFIG.read_text(encoding="utf-8"))
-        return dados.get("ultimo_csv")
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        return data.get("ultimo_csv")
     except (OSError, ValueError):
         return None
 
 
-def guardar_ultimo_caminho(caminho: str) -> None:
+def save_last_path(path: str) -> None:
     try:
-        FICHEIRO_CONFIG.write_text(
-            json.dumps({"ultimo_csv": caminho}), encoding="utf-8")
+        CONFIG_FILE.write_text(
+            json.dumps({"ultimo_csv": path}), encoding="utf-8")
     except OSError:
-        pass   # não é crítico: a app funciona na mesma
+        pass  # not critical: the app still works fine
 
 
 # ---------- Interface ----------
 class App(tk.Tk):
-    """Janela principal. Herda de tk.Tk, ou seja, a própria classe é a janela."""
+    """Main window. Inherits from tk.Tk, meaning the class itself is the window."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Watchlist")
+        self.title("BoxdList")
         self.geometry("760x600")
 
-        self.filmes: list[dict] = []     # lista original, na ordem do CSV
-        self.visiveis: list[dict] = []   # filtrados e ordenados (o que se vê)
-        self.coluna_ordem: str | None = None
-        self.ordem_inversa = False
-        self.ultimo_sorteado: dict | None = None
-        self._job_pesquisa = None        # id do after() pendente (debounce)
+        self.movies: list[dict] = []     # original list, in CSV order
+        self.visible: list[dict] = []    # filtered and sorted (what is seen)
+        self.sort_column: str | None = None
+        self.reverse_order = False
+        self.last_randomized: dict | None = None
+        self._search_job = None          # pending after() ID (debounce)
 
-        # ---------- Linha 1: importar, pesquisa e contador ----------
-        topo = ttk.Frame(self, padding=8)
-        topo.pack(fill="x")
+        # ---------- Row 1: Import, search, and counter ----------
+        top = ttk.Frame(self, padding=8)
+        top.pack(fill="x")
 
-        ttk.Button(topo, text="Importar CSV (Ctrl+O)",
-                   command=self.importar_csv).pack(side="left", padx=(0, 10))
+        ttk.Button(top, text="Import CSV (Ctrl+O)",
+                   command=self.import_csv).pack(side="left", padx=(0, 10))
 
-        ttk.Label(topo, text="Pesquisar:").pack(side="left")
-        self.pesquisa = tk.StringVar()
-        self.pesquisa.trace_add("write", lambda *_: self.agendar_atualizacao())
-        ttk.Entry(topo, textvariable=self.pesquisa).pack(
+        ttk.Label(top, text="Search:").pack(side="left")
+        self.search = tk.StringVar()
+        self.search.trace_add("write", lambda *_: self.schedule_update())
+        ttk.Entry(top, textvariable=self.search).pack(
             side="left", fill="x", expand=True, padx=6)
 
-        self.contador = ttk.Label(topo, text="")
-        self.contador.pack(side="right")
+        self.counter = ttk.Label(top, text="")
+        self.counter.pack(side="right")
 
-        # ---------- Linha 2: filtros por ano e por década ----------
-        filtros = ttk.Frame(self, padding=(8, 0, 8, 6))
-        filtros.pack(fill="x")
+        # ---------- Row 2: Year filters and decade dropdown ----------
+        filters = ttk.Frame(self, padding=(8, 0, 8, 6))
+        filters.pack(fill="x")
 
-        ttk.Label(filtros, text="Anos de:").pack(side="left")
-        self.ano_min = tk.StringVar()
-        ttk.Entry(filtros, textvariable=self.ano_min, width=6).pack(
+        ttk.Label(filters, text="Years from:").pack(side="left")
+        self.year_min = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.year_min, width=6).pack(
             side="left", padx=4)
-        ttk.Label(filtros, text="a").pack(side="left")
-        self.ano_max = tk.StringVar()
-        ttk.Entry(filtros, textvariable=self.ano_max, width=6).pack(
+        ttk.Label(filters, text="to").pack(side="left")
+        self.year_max = tk.StringVar()
+        ttk.Entry(filters, textvariable=self.year_max, width=6).pack(
             side="left", padx=4)
-        for var in (self.ano_min, self.ano_max):
-            var.trace_add("write", lambda *_: self.agendar_atualizacao())
+        for var in (self.year_min, self.year_max):
+            var.trace_add("write", lambda *_: self.schedule_update())
 
-        ttk.Label(filtros, text="Década:").pack(side="left", padx=(14, 4))
-        self.decada = ttk.Combobox(filtros, state="readonly", width=8,
-                                   values=[SEM_FILTRO])
-        self.decada.set(SEM_FILTRO)
-        self.decada.pack(side="left")
-        self.decada.bind("<<ComboboxSelected>>", lambda _: self.escolher_decada())
+        ttk.Label(filters, text="Decade:").pack(side="left", padx=(14, 4))
+        self.decade = ttk.Combobox(filters, state="readonly", width=8,
+                                   values=[NO_FILTER])
+        self.decade.set(NO_FILTER)
+        self.decade.pack(side="left")
+        self.decade.bind("<<ComboboxSelected>>", lambda _: self.select_decade())
 
-        ttk.Button(filtros, text="Limpar filtros",
-                   command=self.limpar_filtros).pack(side="left", padx=14)
+        ttk.Button(filters, text="Clear filters",
+                   command=self.clear_filters).pack(side="left", padx=14)
 
-        # ---------- Tabela ----------
-        meio = ttk.Frame(self, padding=(8, 0))
-        meio.pack(fill="both", expand=True)
+        # ---------- Table ----------
+        middle = ttk.Frame(self, padding=(8, 0))
+        middle.pack(fill="both", expand=True)
 
-        self.tabela = ttk.Treeview(
-            meio, columns=[c[0] for c in COLUNAS], show="headings")
-        for col, titulo, larg in COLUNAS:
-            # c=col fixa o valor de col em cada volta do ciclo
-            self.tabela.heading(col, text=titulo,
-                                command=lambda c=col: self.ordenar(c))
-            self.tabela.column(col, width=larg, anchor="w")
+        self.table = ttk.Treeview(
+            middle, columns=[c[0] for c in COLUMNS], show="headings")
+        for col, title, width in COLUMNS:
+            # c=col fixes the value of col in each loop iteration
+            self.table.heading(col, text=title,
+                               command=lambda c=col: self.sort(c))
+            self.table.column(col, width=width, anchor="w")
 
-        barra = ttk.Scrollbar(meio, orient="vertical",
-                              command=self.tabela.yview)
-        self.tabela.configure(yscrollcommand=barra.set)
-        self.tabela.pack(side="left", fill="both", expand=True)
-        barra.pack(side="right", fill="y")
+        scrollbar = ttk.Scrollbar(middle, orient="vertical",
+                                  command=self.table.yview)
+        self.table.configure(yscrollcommand=scrollbar.set)
+        self.table.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
-        # Mensagem por cima da tabela quando não há nada para mostrar
-        self.aviso = ttk.Label(self.tabela, text="", foreground="gray")
+        # Warning message overlay when there is nothing to display
+        self.warning = ttk.Label(self.table, text="", foreground="gray")
 
-        self.tabela.bind("<Double-1>", lambda _: self.abrir_link())
+        self.table.bind("<Double-1>", lambda _: self.open_link())
 
-        # ---------- Zona de baixo ----------
-        baixo = ttk.Frame(self, padding=8)
-        baixo.pack(fill="x")
+        # ---------- Bottom Section ----------
+        bottom = ttk.Frame(self, padding=8)
+        bottom.pack(fill="x")
 
-        ttk.Button(baixo, text="Filme aleatório",
-                   command=self.aleatorio).pack(side="left")
-        ttk.Button(baixo, text="Abrir no Letterboxd (Enter)",
-                   command=self.abrir_link).pack(side="left", padx=6)
+        ttk.Button(bottom, text="Random Movie",
+                   command=self.random_movie).pack(side="left")
+        ttk.Button(bottom, text="Open in Letterboxd (Enter)",
+                   command=self.open_link).pack(side="left", padx=6)
 
-        self.resultado = ttk.Label(
-            baixo, text="", font=("TkDefaultFont", 11, "bold"))
-        self.resultado.pack(side="left", padx=12)
+        self.result = ttk.Label(
+            bottom, text="", font=("TkDefaultFont", 11, "bold"))
+        self.result.pack(side="left", padx=12)
 
-        # ---------- Atalhos de teclado ----------
-        self.bind("<Control-o>", lambda _: self.importar_csv())
-        self.bind("<Return>", lambda _: self.abrir_link())
+        # ---------- Keyboard Shortcuts ----------
+        self.bind("<Control-o>", lambda _: self.import_csv())
+        self.bind("<Return>", lambda _: self.open_link())
 
-        self.atualizar_lista()
-        self.carregar_ultimo_csv()
+        self.update_list()
+        self.load_last_csv()
 
-    # ----- Carregar dados -----
-    def carregar_ultimo_csv(self) -> None:
-        """Ao arrancar, tenta voltar a abrir o último CSV usado."""
-        caminho = ler_ultimo_caminho()
-        if caminho and Path(caminho).is_file():
+    # ----- Data Loading -----
+    def load_last_csv(self) -> None:
+        """On startup, attempts to reload the last used CSV."""
+        path = read_last_path()
+        if path and Path(path).is_file():
             try:
-                self.definir_filmes(carregar_filmes(caminho)[0])
+                self.set_movies(load_movies(path)[0])
             except (OSError, ValueError, UnicodeDecodeError, csv.Error):
-                pass   # ficheiro mudou ou ficou inválido: arranca vazio
+                pass  # file changed or became invalid: starts empty
 
-    def importar_csv(self) -> None:
-        caminho = filedialog.askopenfilename(
-            title="Escolher CSV da watchlist",
-            filetypes=[("CSV", "*.csv"), ("Todos os ficheiros", "*.*")])
-        if not caminho:
+    def import_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Choose Watchlist CSV",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
+        if not path:
             return
 
         try:
-            filmes, ignoradas = carregar_filmes(caminho)
-        except (OSError, ValueError, UnicodeDecodeError, csv.Error) as erro:
-            messagebox.showerror("Erro ao importar", str(erro))
+            movies, ignored = load_movies(path)
+        except (OSError, ValueError, UnicodeDecodeError, csv.Error) as error:
+            messagebox.showerror("Import Error", str(error))
             return
 
-        guardar_ultimo_caminho(caminho)
-        self.definir_filmes(filmes)
+        save_last_path(path)
+        self.set_movies(movies)
 
-        incompletos = sum(esta_incompleto(f) for f in filmes)
-        if ignoradas or incompletos:
+        incomplete = sum(is_incomplete(f) for f in movies)
+        if ignored or incomplete:
             messagebox.showwarning(
-                "Importação",
-                f"{len(filmes)} filmes importados.\n"
-                f"- {ignoradas} linhas ignoradas (sem nome ou mal formatadas)\n"
-                f"- {incompletos} filmes com dados em falta (mostrados com {VAZIO})")
+                "Import",
+                f"{len(movies)} movies imported.\n"
+                f"- {ignored} lines ignored (missing name or malformed)\n"
+                f"- {incomplete} movies with missing data (shown with {EMPTY})")
 
-    def definir_filmes(self, filmes: list[dict]) -> None:
-        """Substitui a watchlist atual e refresca tudo."""
-        self.filmes = filmes
-        self.ultimo_sorteado = None
-        self.resultado.config(text="")
+    def set_movies(self, movies: list[dict]) -> None:
+        """Replaces the current watchlist and refreshes everything."""
+        self.movies = movies
+        self.last_randomized = None
+        self.result.config(text="")
 
-        # Atualiza as décadas disponíveis no filtro
-        anos = [a for a in (ano_como_int(f["ano"]) for f in filmes) if a]
-        decadas = sorted({a // 10 * 10 for a in anos})
-        self.decada.config(values=[SEM_FILTRO] + [f"{d}s" for d in decadas])
-        self.limpar_filtros()
+        # Updates available decades in the filter dropdown
+        years = [a for a in (year_as_int(f["year"]) for f in movies) if a]
+        decades = sorted({a // 10 * 10 for a in years})
+        self.decade.config(values=[NO_FILTER] + [f"{d}s" for d in decades])
+        self.clear_filters()
 
-    # ----- Filtros -----
-    def escolher_decada(self) -> None:
-        escolha = self.decada.get()
-        if escolha == SEM_FILTRO:
-            self.ano_min.set("")
-            self.ano_max.set("")
+    # ----- Filters -----
+    def select_decade(self) -> None:
+        choice = self.decade.get()
+        if choice == NO_FILTER:
+            self.year_min.set("")
+            self.year_max.set("")
         else:
-            inicio = int(escolha[:-1])   # "1990s" -> 1990
-            self.ano_min.set(str(inicio))
-            self.ano_max.set(str(inicio + 9))
+            start = int(choice[:-1])  # "1990s" -> 1990
+            self.year_min.set(str(start))
+            self.year_max.set(str(start + 9))
 
-    def limpar_filtros(self) -> None:
-        # Cada set() dispara o agendamento; só corre uma atualização no fim
-        self.pesquisa.set("")
-        self.ano_min.set("")
-        self.ano_max.set("")
-        self.decada.set(SEM_FILTRO)
-        self.atualizar_lista()
+    def clear_filters(self) -> None:
+        # Each set() triggers scheduling; only one update runs at the end
+        self.search.set("")
+        self.year_min.set("")
+        self.year_max.set("")
+        self.decade.set(NO_FILTER)
+        self.update_list()
 
-    # ----- Atualização da tabela -----
-    def agendar_atualizacao(self) -> None:
-        """Espera um pouco após a última alteração (evita filtrar a cada tecla)."""
-        if self._job_pesquisa is not None:
-            self.after_cancel(self._job_pesquisa)
-        self._job_pesquisa = self.after(ATRASO_PESQUISA_MS, self.atualizar_lista)
+    # ----- Table Updates -----
+    def schedule_update(self) -> None:
+        """Waits a bit after the last change (prevents filtering on every keypress)."""
+        if self._search_job is not None:
+            self.after_cancel(self._search_job)
+        self._search_job = self.after(SEARCH_DELAY_MS, self.update_list)
 
-    def atualizar_lista(self) -> None:
-        """Filtra, ordena (sem tocar na lista original) e refaz a tabela."""
-        if self._job_pesquisa is not None:
-            self.after_cancel(self._job_pesquisa)
-            self._job_pesquisa = None
+    def update_list(self) -> None:
+        """Filters, sorts (without touching original list) and rebuilds the table."""
+        if self._search_job is not None:
+            self.after_cancel(self._search_job)
+            self._search_job = None
 
-        filtrados = filtrar(self.filmes, self.pesquisa.get(),
-                            ano_como_int(self.ano_min.get()),
-                            ano_como_int(self.ano_max.get()))
-        self.visiveis = ordenar_filmes(
-            filtrados, self.coluna_ordem, self.ordem_inversa)
+        filtered = filter_movies(self.movies, self.search.get(),
+                                 year_as_int(self.year_min.get()),
+                                 year_as_int(self.year_max.get()))
+        self.visible = sort_movies(
+            filtered, self.sort_column, self.reverse_order)
 
-        self.tabela.delete(*self.tabela.get_children())
-        # iid = índice em self.visiveis, para recuperar o filme selecionado
-        for i, f in enumerate(self.visiveis):
-            self.tabela.insert("", "end", iid=str(i),
-                               values=(f["nome"], f["ano"] or VAZIO, f["data"] or VAZIO))
+        self.table.delete(*self.table.get_children())
+        # iid = index in self.visible, to recover the selected movie
+        for i, f in enumerate(self.visible):
+            self.table.insert("", "end", iid=str(i),
+                              values=(f["name"], f["year"] or EMPTY, f["date"] or EMPTY))
 
-        self.contador.config(text=f"{len(self.visiveis)} / {len(self.filmes)}")
-        self.atualizar_cabecalhos()
-        self.atualizar_aviso()
+        self.counter.config(text=f"{len(self.visible)} / {len(self.movies)}")
+        self.update_headers()
+        self.update_warning()
 
-    def atualizar_cabecalhos(self) -> None:
-        """Mostra ▲ / ▼ na coluna pela qual está ordenado."""
-        seta = " ▼" if self.ordem_inversa else " ▲"
-        for col, titulo, _ in COLUNAS:
-            texto = titulo + (seta if col == self.coluna_ordem else "")
-            self.tabela.heading(col, text=texto)
+    def update_headers(self) -> None:
+        """Shows ▲ / ▼ on the column currently used for sorting."""
+        arrow = " ▼" if self.reverse_order else " ▲"
+        for col, title, _ in COLUMNS:
+            text = title + (arrow if col == self.sort_column else "")
+            self.table.heading(col, text=text)
 
-    def atualizar_aviso(self) -> None:
-        if not self.filmes:
-            self.aviso.config(text="Importa um CSV para começar (Ctrl+O)")
-        elif not self.visiveis:
-            self.aviso.config(text="Nenhum filme corresponde aos filtros")
+    def update_warning(self) -> None:
+        if not self.movies:
+            self.warning.config(text="Import a CSV to begin (Ctrl+O)")
+        elif not self.visible:
+            self.warning.config(text="No movies match the filters")
         else:
-            self.aviso.place_forget()
+            self.warning.place_forget()
             return
-        self.aviso.place(relx=0.5, rely=0.4, anchor="center")
+        self.warning.place(relx=0.5, rely=0.4, anchor="center")
 
-    # ----- Ações -----
-    def ordenar(self, coluna: str) -> None:
-        """Ordena pela coluna; clicar na mesma coluna inverte a direção."""
-        if coluna == self.coluna_ordem:
-            self.ordem_inversa = not self.ordem_inversa
+    # ----- Actions -----
+    def sort(self, column: str) -> None:
+        """Sorts by column; clicking the same column reverses direction."""
+        if column == self.sort_column:
+            self.reverse_order = not self.reverse_order
         else:
-            self.coluna_ordem = coluna
-            self.ordem_inversa = False
-        self.atualizar_lista()
+            self.sort_column = column
+            self.reverse_order = False
+        self.update_list()
 
-    def aleatorio(self) -> None:
-        if not self.visiveis:
-            messagebox.showinfo("Watchlist",
-                                "Nenhum filme para escolher. Importa um CSV primeiro.")
+    def random_movie(self) -> None:
+        if not self.visible:
+            messagebox.showinfo("BoxdList",
+                                "No movies to choose from. Import a CSV first.")
             return
 
-        f = escolher_aleatorio(self.visiveis, self.ultimo_sorteado)
-        self.ultimo_sorteado = f
-        iid = str(self.visiveis.index(f))
+        f = pick_random(self.visible, self.last_randomized)
+        self.last_randomized = f
+        iid = str(self.visible.index(f))
 
-        self.tabela.selection_set(iid)
-        self.tabela.see(iid)
-        ano = f" ({f['ano']})" if f["ano"] else ""
-        self.resultado.config(text=f["nome"] + ano)
+        self.table.selection_set(iid)
+        self.table.see(iid)
+        year = f" ({f['year']})" if f["year"] else ""
+        self.result.config(text=f["name"] + year)
 
-    def abrir_link(self) -> None:
-        sel = self.tabela.selection()
+    def open_link(self) -> None:
+        sel = self.table.selection()
         if not sel:
             return
-        url = self.visiveis[int(sel[0])]["url"]
+        url = self.visible[int(sel[0])]["url"]
         if url:
             webbrowser.open(url)
         else:
-            messagebox.showinfo("Watchlist", "Este filme não tem link.")
+            messagebox.showinfo("BoxdList", "This movie has no link.")
 
 
 if __name__ == "__main__":

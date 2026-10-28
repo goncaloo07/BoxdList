@@ -4,6 +4,8 @@ A desktop app to browse, search, filter and randomly pick from your Letterboxd w
 
 Import the CSV exported from Letterboxd and see your whole watchlist in one table. Can't decide what to watch? Let it pick one for you.
 
+<img src="assets/screenshot.png" alt="BoxdList screenshot" width="400">
+
 ## Features
 
 - Sortable table with title, year and the date you added each film
@@ -68,4 +70,4 @@ BoxdList is an independent project and is not affiliated with, endorsed by or co
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE.md)
