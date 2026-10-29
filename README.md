@@ -30,7 +30,7 @@ There are two ways to get the CSV file:
 1. Go to **Settings → Import & Export** and choose **Export your data**.
 2. Unzip the file you receive. The one you need is `watchlist.csv`.
 
-Then, in BoxdList, click **Importar CSV** (or press `Ctrl+O`) and select the file.
+Then, in BoxdList, click **Import CSV** (or press `Ctrl+O`) and select the file.
 
 ## Download
 
