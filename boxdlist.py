@@ -8,6 +8,7 @@ import csv
 import json
 import random
 import re
+import sys
 import tkinter as tk
 import unicodedata
 import webbrowser
@@ -147,6 +148,12 @@ def save_last_path(path: str) -> None:
             json.dumps({"ultimo_csv": path}), encoding="utf-8")
     except OSError:
         pass  # not critical: the app still works fine
+    
+# ---------- Resources (icon) ----------
+def resource_path(relative: str) -> Path:
+    """Finds a file both when running the code and inside the .exe."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    return base / relative
 
 
 # ---------- Interface ----------
@@ -157,6 +164,7 @@ class App(tk.Tk):
         super().__init__()
         self.title("BoxdList")
         self.geometry("760x600")
+        self.set_icon()
 
         self.movies: list[dict] = []     # original list, in CSV order
         self.visible: list[dict] = []    # filtered and sorted (what is seen)
@@ -248,6 +256,18 @@ class App(tk.Tk):
 
         self.update_list()
         self.load_last_csv()
+        
+    def set_icon(self) -> None:
+        """Sets the app icon on the window and taskbar."""
+        try:
+            if sys.platform == "win32":
+                self.iconbitmap(str(resource_path("assets/boxdlist.ico")))
+            else:
+                self.icon = tk.PhotoImage(
+                    file=str(resource_path("assets/boxdlist_logo.png")))
+                self.iconphoto(True, self.icon)  # keep a reference or it disappears
+        except tk.TclError:
+            pass  # the app still works without an icon
 
     # ----- Data Loading -----
     def load_last_csv(self) -> None:
