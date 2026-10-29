@@ -3,7 +3,7 @@ import pytest
 import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
-                      sort_movies, year_as_int)
+                      sort_movies, year_as_int, year_range_error)
 
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
@@ -48,6 +48,33 @@ def test_normalize_empty_text():
 ])
 def test_year_as_int(value, expected):
     assert year_as_int(value) == expected
+
+
+# ---------- year_range_error ----------
+@pytest.mark.parametrize("low, high", [
+    ("", ""),             # no limits at all
+    ("1990", ""),         # only a minimum
+    ("", "2000"),         # only a maximum
+    ("1990", "2000"),     # normal range
+    ("2000", "2000"),     # same year is valid
+    (" 1990 ", " 2000 "), # outer spaces are ignored
+])
+def test_year_range_error_valid(low, high):
+    assert year_range_error(low, high) is None
+
+
+@pytest.mark.parametrize("low, high", [
+    ("abc", ""),          # not a number
+    ("199", ""),          # too short
+    ("", "20000"),        # too long
+    ("1990", "20a0"),     # mixed letters and digits
+])
+def test_year_range_error_needs_four_digits(low, high):
+    assert year_range_error(low, high) == "Years must have 4 digits"
+
+
+def test_year_range_error_inverted_range():
+    assert year_range_error("2000", "1990") == "'From' is after 'to'"
 
 
 # ---------- load_movies ----------
@@ -274,3 +301,18 @@ def test_config_save_in_missing_folder_does_not_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(boxdlist, "CONFIG_FILE",
                         tmp_path / "missing_folder" / "cfg.json")
     save_last_path("/tmp/w.csv")  # should not raise an error
+    
+def test_config_reads_old_key(tmp_path, monkeypatch):
+    # Config files created before the rename still work
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text('{"ultimo_csv": "/tmp/old.csv"}', encoding="utf-8")
+    monkeypatch.setattr(boxdlist, "CONFIG_FILE", cfg)
+    assert read_last_path() == "/tmp/old.csv"
+
+
+def test_config_new_key_wins_over_old(tmp_path, monkeypatch):
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text('{"last_csv": "/tmp/new.csv", "ultimo_csv": "/tmp/old.csv"}',
+                   encoding="utf-8")
+    monkeypatch.setattr(boxdlist, "CONFIG_FILE", cfg)
+    assert read_last_path() == "/tmp/new.csv"

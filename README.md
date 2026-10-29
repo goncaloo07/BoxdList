@@ -51,7 +51,7 @@ On Linux you may need Tkinter: `sudo apt install python3-tk`.
 ## Run the tests
 
 ```
-pip install -r requirements-dev.txt
+pip install -r requirements.txt
 python -m pytest
 ```
 
@@ -59,10 +59,12 @@ python -m pytest
 
 ```
 pip install pyinstaller
-pyinstaller --windowed --name BoxdList --icon assets/boxdlist.ico boxdlist.py
+pyinstaller --windowed --name BoxdList --icon assets/boxdlist.ico --add-data "assets/boxdlist.ico;assets" boxdlist.py
 ```
 
 The result is in `dist/BoxdList/`.
+
+The `--add-data` part copies the icon into the build so the window and taskbar can show it. On Linux and macOS, use `:` instead of `;` as the separator.
 
 ## Disclaimer
 

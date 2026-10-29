@@ -90,6 +90,20 @@ def year_as_int(value: str) -> int | None:
     return int(value) if value.isdigit() else None
 
 
+def year_range_error(year_min: str, year_max: str) -> str | None:
+    """Returns a short message if the year fields are invalid, else None."""
+    values = []
+    for text in (year_min.strip(), year_max.strip()):
+        # empty is fine (no limit), but anything else needs exactly 4 digits
+        if text and not VALID_YEAR.fullmatch(text):
+            return "Years must have 4 digits"
+        values.append(int(text) if text else None)
+    low, high = values
+    if low is not None and high is not None and low > high:
+        return "'From' is after 'to'"
+    return None
+
+
 def filter_movies(movies: list[dict], term: str,
                   year_min: int | None, year_max: int | None) -> list[dict]:
     """Filters by name (accent/case-insensitive) and year range."""
@@ -137,7 +151,7 @@ def pick_random(movies: list[dict], last: dict | None) -> dict:
 def read_last_path() -> str | None:
     try:
         data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        return data.get("ultimo_csv")
+        return data.get("last_csv") or data.get("ultimo_csv")
     except (OSError, ValueError):
         return None
 
@@ -145,10 +159,11 @@ def read_last_path() -> str | None:
 def save_last_path(path: str) -> None:
     try:
         CONFIG_FILE.write_text(
-            json.dumps({"ultimo_csv": path}), encoding="utf-8")
+            json.dumps({"last_csv": path}), encoding="utf-8")
     except OSError:
         pass  # not critical: the app still works fine
-    
+
+
 # ---------- Resources (icon) ----------
 def resource_path(relative: str) -> Path:
     """Finds a file both when running the code and inside the .exe."""
@@ -164,6 +179,7 @@ class App(tk.Tk):
         super().__init__()
         self.title("BoxdList")
         self.geometry("760x600")
+        self.minsize(700, 400)
         self.set_icon()
 
         self.movies: list[dict] = []     # original list, in CSV order
@@ -214,6 +230,10 @@ class App(tk.Tk):
         ttk.Button(filters, text="Clear filters",
                    command=self.clear_filters).pack(side="left", padx=14)
 
+        # Red message for invalid year fields (empty when everything is fine)
+        self.year_error = ttk.Label(filters, text="", foreground="red")
+        self.year_error.pack(side="left")
+
         # ---------- Table ----------
         middle = ttk.Frame(self, padding=(8, 0))
         middle.pack(fill="both", expand=True)
@@ -235,7 +255,7 @@ class App(tk.Tk):
         # Warning message overlay when there is nothing to display
         self.warning = ttk.Label(self.table, text="", foreground="gray")
 
-        self.table.bind("<Double-1>", lambda _: self.open_link())
+        self.table.bind("<Double-1>", self.on_double_click)
 
         # ---------- Bottom Section ----------
         bottom = ttk.Frame(self, padding=8)
@@ -252,11 +272,11 @@ class App(tk.Tk):
 
         # ---------- Keyboard Shortcuts ----------
         self.bind("<Control-o>", lambda _: self.import_csv())
-        self.bind("<Return>", lambda _: self.open_link())
+        self.table.bind("<Return>", lambda _: self.open_link())
 
         self.update_list()
         self.load_last_csv()
-        
+
     def set_icon(self) -> None:
         """Sets the app icon on the window and taskbar."""
         try:
@@ -347,11 +367,17 @@ class App(tk.Tk):
             self.after_cancel(self._search_job)
             self._search_job = None
 
+        # Show a message if the year fields are invalid or in the wrong order
+        self.year_error.config(
+            text=year_range_error(self.year_min.get(), self.year_max.get()) or "")
+
         filtered = filter_movies(self.movies, self.search.get(),
                                  year_as_int(self.year_min.get()),
                                  year_as_int(self.year_max.get()))
         self.visible = sort_movies(
             filtered, self.sort_column, self.reverse_order)
+        if not any(m is self.last_randomized for m in self.visible):
+            self.result.config(text="")
 
         self.table.delete(*self.table.get_children())
         # iid = index in self.visible, to recover the selected movie
@@ -398,12 +424,14 @@ class App(tk.Tk):
 
         f = pick_random(self.visible, self.last_randomized)
         self.last_randomized = f
-        iid = str(self.visible.index(f))
+        # find by identity, so duplicate movies map to the right row
+        iid = str(next(i for i, m in enumerate(self.visible) if m is f))
 
         self.table.selection_set(iid)
         self.table.see(iid)
         year = f" ({f['year']})" if f["year"] else ""
         self.result.config(text=f["name"] + year)
+        self.table.focus_set()
 
     def open_link(self) -> None:
         sel = self.table.selection()
@@ -414,6 +442,12 @@ class App(tk.Tk):
             webbrowser.open(url)
         else:
             messagebox.showinfo("BoxdList", "This movie has no link.")
+
+    def on_double_click(self, event) -> None:
+        """Opens the link only if a row was double-clicked, not the header."""
+        # identify_region returns "heading", "cell" or "nothing"
+        if self.table.identify_region(event.x, event.y) == "cell":
+            self.open_link()
 
 
 if __name__ == "__main__":
