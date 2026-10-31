@@ -199,8 +199,8 @@ class App(tk.Tk):
         ttk.Label(top, text="Search:").pack(side="left")
         self.search = tk.StringVar()
         self.search.trace_add("write", lambda *_: self.schedule_update())
-        ttk.Entry(top, textvariable=self.search).pack(
-            side="left", fill="x", expand=True, padx=6)
+        self.search_entry = ttk.Entry(top, textvariable=self.search)
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=6)
 
         self.counter = ttk.Label(top, text="")
         self.counter.pack(side="right")
@@ -261,7 +261,7 @@ class App(tk.Tk):
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(fill="x")
 
-        ttk.Button(bottom, text="Random Movie",
+        ttk.Button(bottom, text="Random Movie (Ctrl+R)",
                    command=self.random_movie).pack(side="left")
         ttk.Button(bottom, text="Open in Letterboxd (Enter)",
                    command=self.open_link).pack(side="left", padx=6)
@@ -272,6 +272,10 @@ class App(tk.Tk):
 
         # ---------- Keyboard Shortcuts ----------
         self.bind("<Control-o>", lambda _: self.import_csv())
+        self.bind("<Control-f>", lambda _: self.focus_on_search())
+        self.bind("<Control-F>", lambda _: self.focus_on_search())
+        self.bind("<Control-r>", lambda _: self.random_movie())
+        self.bind("<Control-R>", lambda _: self.random_movie())
         self.table.bind("<Return>", lambda _: self.open_link())
 
         self.update_list()
@@ -448,6 +452,13 @@ class App(tk.Tk):
         # identify_region returns "heading", "cell" or "nothing"
         if self.table.identify_region(event.x, event.y) == "cell":
             self.open_link()
+            
+    def focus_on_search(self) -> None:
+        """Focus on the search bar"""
+        # puts the cursor inside the box
+        self.search_entry.focus_set()
+        # selects the old text, so typing replaces it
+        self.search_entry.select_range(0, "end")
 
 
 if __name__ == "__main__":

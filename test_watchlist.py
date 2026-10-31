@@ -36,6 +36,15 @@ def table_names(app):
     # Each row has an id; the first value of a row is the movie name
     return [app.table.item(row, "values")[0]
             for row in app.table.get_children()]
+    
+def press(app, sequence):
+    # Key events only reach a visible window that has focus
+    app.deiconify()
+    app.update()
+    app.focus_force()
+    app.update()
+    app.event_generate(sequence)
+    app.update()
 
 
 # ---------- normalize ----------
@@ -341,6 +350,7 @@ def _window():
 @pytest.fixture
 def app(_window):
     # Back to a clean state before each test
+    _window.withdraw()
     _window.set_movies([])
     _window.sort_column = None
     _window.reverse_order = False
@@ -436,3 +446,23 @@ def test_clear_filters(app, movies):
     assert app.year_max.get() == ""
     assert app.decade.get() == "All"
     assert len(table_names(app)) == 4
+    
+def test_ctrl_r_shortcuts_pick_random_movie(app, monkeypatch):
+    called = []
+    # Replace the real method with one that only records the call
+    monkeypatch.setattr(app, "random_movie", lambda: called.append(1))
+    press(app, "<Control-r>")
+    assert len(called) == 1
+    press(app, "<Control-R>")
+    assert len(called) == 2
+    
+def test_ctrl_f_shortcuts_focus_search(app):
+    app.search.set("blade")
+    press(app, "<Control-f>")
+    assert app.focus_get() is app.search_entry
+    assert app.search_entry.selection_present()
+    press(app, "<Tab>")
+    assert app.focus_get() is not app.search_entry
+    press(app, "<Control-F>")
+    assert app.focus_get() is app.search_entry
+    assert app.search_entry.selection_present()
