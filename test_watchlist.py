@@ -1,4 +1,5 @@
 import pytest
+import tkinter as tk
 
 import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
@@ -30,6 +31,11 @@ def write_csv(path, lines, header="Date,Name,Year,Letterboxd URI"):
 
 def names(items):
     return [m["name"] for m in items]
+
+def table_names(app):
+    # Each row has an id; the first value of a row is the movie name
+    return [app.table.item(row, "values")[0]
+            for row in app.table.get_children()]
 
 
 # ---------- normalize ----------
@@ -316,3 +322,117 @@ def test_config_new_key_wins_over_old(tmp_path, monkeypatch):
                    encoding="utf-8")
     monkeypatch.setattr(boxdlist, "CONFIG_FILE", cfg)
     assert read_last_path() == "/tmp/new.csv"
+    
+# UI testing
+
+@pytest.fixture(scope="session")
+def _window():
+    # monkeypatch only works per test, so use its context manager here
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(boxdlist, "read_last_path", lambda: None)
+        try:
+            window = boxdlist.App()
+        except tk.TclError as error:
+            pytest.skip(f"Could not create window: {error}")
+    window.withdraw()
+    yield window
+    window.destroy()
+    
+@pytest.fixture
+def app(_window):
+    # Back to a clean state before each test
+    _window.set_movies([])
+    _window.sort_column = None
+    _window.reverse_order = False
+    return _window
+    
+def test_warning_when_no_csv(app):
+    # A fresh app has no movies, so it asks for an import
+    assert app.warning.cget("text") == "Import a CSV to begin (Ctrl+O)"
+    
+def test_counter_shows_total(app, movies):
+    app.set_movies(movies)
+    # 4 movies in the fixture, all visible at the start
+    assert app.counter.cget("text") == "4 / 4"
+    
+def test_counter_with_search(app, movies):
+    app.set_movies(movies)
+    app.search.set("blade") # searches to make only one movie appear
+    app.update_list()
+    assert app.counter.cget("text") == "1 / 4"
+    
+def test_warning_when_search_has_no_results(app, movies):
+    app.set_movies(movies)
+    app.search.set("zxjcijsioefho")
+    app.update_list()
+    assert app.warning.cget("text") == "No movies match the filters"
+    
+def test_warning_hidden_when_movies_are_visible(app, movies):
+    app.set_movies(movies)
+    assert app.warning.place_info() == {}
+    
+def test_table_shows_all_movies(app, movies):
+    app.set_movies(movies)
+    assert len(table_names(app)) == 4
+
+def test_sort_table_by_name(app, movies):
+    app.set_movies(list(reversed(movies)))
+    app.sort("name")
+    assert table_names(app) == ["Amélie", "Blade Runner", "Cidade de Deus", "No Year"]
+    
+def test_sort_table_by_double_clicking(app, movies):
+    app.set_movies(movies)
+    app.sort("name")
+    app.sort("name")
+    assert table_names(app) == ["No Year", "Cidade de Deus", "Blade Runner", "Amélie"]
+    
+def test_sort_other_column_resets_direction(app, movies):
+    app.set_movies(movies)
+    app.sort("name")
+    app.sort("name")
+    assert app.reverse_order is True
+    app.sort("year")
+    assert app.reverse_order is False
+    assert table_names(app) == ["No Year", "Blade Runner", "Amélie", "Cidade de Deus"]
+    
+def test_decade_dropdown_lists_decades(app, movies):
+    app.set_movies(movies)
+    assert list(app.decade.cget("values")) == ["All", "1980s", "2000s"]
+    
+def test_decade_filters_table(app, movies):
+    app.set_movies(movies)
+    app.decade.set("2000s")
+    app.select_decade()
+    app.update_list()
+    assert app.year_min.get() == "2000"
+    assert app.year_max.get() == "2009"
+    assert table_names(app) == ["Amélie", "Cidade de Deus"]
+    
+def test_random_movie_shows_result(app, movies):
+    app.set_movies([movies[0]])
+    app.random_movie()
+    assert app.result.cget("text") == "Amélie (2001)"
+    assert app.table.selection() == ("0",)
+    
+def test_random_with_no_movies_shows_message(app, monkeypatch):
+    shown = []
+    # Replace the real popup with a function that only records the call
+    monkeypatch.setattr(boxdlist.messagebox, "showinfo",
+                        lambda *args, **kwargs: shown.append(args))
+    app.random_movie()  # the app is empty, so it should show the popup
+    # The popup was called exactly once
+    assert len(shown) == 1
+    # args[0] is the window title, args[1] is the message
+    assert shown[0][1] == "No movies to choose from. Import a CSV first."
+    
+def test_clear_filters(app, movies):
+    app.set_movies(movies)
+    app.search.set("blade")
+    app.decade.set("2000s")
+    app.select_decade()
+    app.clear_filters()
+    assert app.search.get() == ""
+    assert app.year_min.get() == ""
+    assert app.year_max.get() == ""
+    assert app.decade.get() == "All"
+    assert len(table_names(app)) == 4
