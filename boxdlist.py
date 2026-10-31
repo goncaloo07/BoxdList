@@ -14,6 +14,12 @@ import unicodedata
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+  
+def app_folder() -> Path:
+    """Folder of the .exe when frozen, or of this file when running the code."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
 
 # ---------- Constants ----------
 # (internal id, header title, width in pixels)
@@ -21,12 +27,14 @@ COLUMNS = (("name", "Movie", 440),
            ("year", "Year", 70),
            ("date", "Added", 110))
 MANDATORY = {"Date", "Name", "Year", "Letterboxd URI"}
-CONFIG_FILE = Path.home() / ".watchlist_config.json"
+CONFIG_FILE = app_folder() / "data" / "boxdlist_config.json"
 SEARCH_DELAY_MS = 200  # wait after the last keypress before filtering
 NO_FILTER = "All"
 EMPTY = "—"            # shown in the table when data is missing
 VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+DEFAULT_SIZE = "760x600"
+VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
 
 
 # ---------- Logic (pure functions, easy to test) ----------
@@ -149,20 +157,53 @@ def pick_random(movies: list[dict], last: dict | None) -> dict:
 
 # ---------- Configuration (remember the last CSV) ----------
 def read_last_path() -> str | None:
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        return data.get("last_csv") or data.get("ultimo_csv")
-    except (OSError, ValueError):
-        return None
-
+    data = read_config()
+    return data.get("last_csv") or data.get("ultimo_csv")
 
 def save_last_path(path: str) -> None:
+    data = read_config()
+    data["last_csv"] = path
+    write_config(data)
+    
+def read_config() -> dict:
+    """Returns the saved settings, or an empty dict if there is a problem."""
     try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except (OSError, ValueError):
+        return {}
+    
+def write_config(data: dict) -> None:
+    """Saves all settings to the config file."""
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(
-            json.dumps({"last_csv": path}), encoding="utf-8")
+            json.dumps(data), encoding="utf-8")
     except OSError:
         pass  # not critical: the app still works fine
+    
+def valid_window_size(value) -> str:
+    """Returns the saved size if it looks right, else the default."""
+    if (isinstance(value, str) and VALID_SIZE.fullmatch(value)):
+        return value
+    return DEFAULT_SIZE
 
+def valid_sort_column(value) -> str | None:
+    """Returns the saved column if it exists, else None."""
+    if not isinstance(value, str):
+        return None
+    cols = {c[0] for c in COLUMNS}
+    if value in cols:
+        return value
+    return None
+
+def valid_reverse_order(value) -> bool:
+    """Returns the saved direction if it is True or False, else False."""
+    if isinstance(value, bool):
+        return value
+    return False
 
 # ---------- Resources (icon) ----------
 def resource_path(relative: str) -> Path:
@@ -178,16 +219,18 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("BoxdList")
-        self.geometry("760x600")
+        config = read_config()
+        self.geometry(valid_window_size(config.get("window_size")))
         self.minsize(700, 400)
         self.set_icon()
 
         self.movies: list[dict] = []     # original list, in CSV order
         self.visible: list[dict] = []    # filtered and sorted (what is seen)
-        self.sort_column: str | None = None
-        self.reverse_order = False
+        self.sort_column = valid_sort_column(config.get("sort_column"))
+        self.reverse_order = valid_reverse_order(config.get("reverse_order"))
         self.last_randomized: dict | None = None
         self._search_job = None          # pending after() ID (debounce)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # ---------- Row 1: Import, search, and counter ----------
         top = ttk.Frame(self, padding=8)
@@ -488,6 +531,15 @@ class App(tk.Tk):
         name = self.visible[int(sel[0])]["name"]
         self.clipboard_clear()          # empties the clipboard
         self.clipboard_append(name)   # puts the text in it
+        
+    def on_close(self) -> None:
+        """Saves the sort and window size, then closes the app."""
+        data = read_config()
+        data["sort_column"] = self.sort_column
+        data["reverse_order"] = self.reverse_order
+        data["window_size"] = f"{self.winfo_width()}x{self.winfo_height()}"
+        write_config(data)
+        self.destroy()
 
 
 if __name__ == "__main__":

@@ -4,7 +4,8 @@ import tkinter as tk
 import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
-                      sort_movies, year_as_int, year_range_error)
+                      sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
+                      valid_reverse_order)
 
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
@@ -316,6 +317,7 @@ def test_config_save_in_missing_folder_does_not_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(boxdlist, "CONFIG_FILE",
                         tmp_path / "missing_folder" / "cfg.json")
     save_last_path("/tmp/w.csv")  # should not raise an error
+    assert (tmp_path / "missing_folder" / "cfg.json").exists()
     
 def test_config_reads_old_key(tmp_path, monkeypatch):
     # Config files created before the rename still work
@@ -339,6 +341,7 @@ def _window():
     # monkeypatch only works per test, so use its context manager here
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(boxdlist, "read_last_path", lambda: None)
+        mp.setattr(boxdlist, "read_config", lambda: {})
         try:
             window = boxdlist.App()
         except tk.TclError as error:
@@ -472,3 +475,50 @@ def test_copy_name_puts_movie_in_clipboard(app, movies):
     app.table.selection_set("0")
     app.copy_name()
     assert app.clipboard_get() == "Amélie"
+    
+@pytest.mark.parametrize("value, expected", [
+    ("900x650", "900x650"),    # good value is kept
+    ("banana", "760x600"),     # bad text falls back
+    (12345, "760x600"),        # not even text
+    (None, "760x600"),         # key missing in the file
+])
+def test_valid_window_size(value, expected):
+    assert valid_window_size(value) == expected
+    
+@pytest.mark.parametrize("value, expected", [
+    ("name", "name"),    # good value is kept
+    ("banana", None),     # bad text falls back
+    (12345, None),        # not even text
+    (None, None),         # key missing in the file
+    (["name"], None),     # a list instead of text
+])
+def test_valid_sort_column(value,expected):
+    assert valid_sort_column(value) == expected
+    
+@pytest.mark.parametrize("value, expected", [
+    (True, True),    # good value is kept
+    (False, False),     # bad text falls back
+    ("yes", False),        # not even text
+    (None, False),         # key missing in the file
+])
+def test_valid_reverse_order(value,expected):
+    assert valid_reverse_order(value) == expected
+    
+def test_on_close_saves_settings(app, monkeypatch):
+    saved = {}
+    # Fake config that already has a saved CSV
+    monkeypatch.setattr(boxdlist, "read_config", lambda: {"last_csv": "/tmp/w.csv"})
+    # Capture what would be written, instead of touching the real file
+    monkeypatch.setattr(boxdlist, "write_config", lambda data: saved.update(data))
+    # Do not really close the shared test window
+    monkeypatch.setattr(app, "destroy", lambda: None)
+    app.sort_column = "year"
+    app.reverse_order = True
+    # show the window so it has a real size
+    app.geometry("900x650")
+    app.update()
+    app.on_close()
+    assert saved["sort_column"] == "year"
+    assert saved["reverse_order"] is True
+    assert saved["last_csv"] == "/tmp/w.csv"   # must still be there
+    assert boxdlist.VALID_SIZE.fullmatch(saved["window_size"])
