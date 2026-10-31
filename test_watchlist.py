@@ -466,3 +466,9 @@ def test_ctrl_f_shortcuts_focus_search(app):
     press(app, "<Control-F>")
     assert app.focus_get() is app.search_entry
     assert app.search_entry.selection_present()
+    
+def test_copy_name_puts_movie_in_clipboard(app, movies):
+    app.set_movies([movies[0]])
+    app.table.selection_set("0")
+    app.copy_name()
+    assert app.clipboard_get() == "Amélie"

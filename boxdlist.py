@@ -269,6 +269,12 @@ class App(tk.Tk):
         self.result = ttk.Label(
             bottom, text="", font=("TkDefaultFont", 11, "bold"))
         self.result.pack(side="left", padx=12)
+        
+        # ---------- Right click menu ------------
+        # tearoff=0 removes the dotted line at the top of the menu
+        self.menu = tk.Menu(self, tearoff=0)
+        self.menu.add_command(label="Open in Letterboxd", command=self.open_link)
+        self.menu.add_command(label="Copy name", command=self.copy_name)
 
         # ---------- Keyboard Shortcuts ----------
         self.bind("<Control-o>", lambda _: self.import_csv())
@@ -277,6 +283,7 @@ class App(tk.Tk):
         self.bind("<Control-r>", lambda _: self.random_movie())
         self.bind("<Control-R>", lambda _: self.random_movie())
         self.table.bind("<Return>", lambda _: self.open_link())
+        self.table.bind("<Button-3>", self.on_right_click)
 
         self.update_list()
         self.load_last_csv()
@@ -453,12 +460,34 @@ class App(tk.Tk):
         if self.table.identify_region(event.x, event.y) == "cell":
             self.open_link()
             
+    def on_right_click(self, event) -> None:
+        """Shows the menu for the row under the mouse."""
+        row = self.table.identify_row(event.y)
+        if not row:
+            return
+        self.table.selection_set(row)
+        try:
+            # x_root and y_root are the position on the whole screen
+            self.menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            # always release, or the menu can block clicks in the window
+            self.menu.grab_release()
+            
     def focus_on_search(self) -> None:
         """Focus on the search bar"""
         # puts the cursor inside the box
         self.search_entry.focus_set()
         # selects the old text, so typing replaces it
         self.search_entry.select_range(0, "end")
+        
+    def copy_name(self) -> None:
+        """Copies the selected movie name to the clipboard."""
+        sel = self.table.selection()
+        if not sel:
+            return
+        name = self.visible[int(sel[0])]["name"]
+        self.clipboard_clear()          # empties the clipboard
+        self.clipboard_append(name)   # puts the text in it
 
 
 if __name__ == "__main__":
