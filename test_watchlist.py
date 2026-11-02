@@ -515,6 +515,7 @@ def test_on_close_saves_settings(app, monkeypatch):
     app.sort_column = "year"
     app.reverse_order = True
     # show the window so it has a real size
+    app.deiconify()
     app.geometry("900x650")
     app.update()
     app.on_close()
