@@ -5,7 +5,7 @@ import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
-                      valid_reverse_order)
+                      valid_reverse_order, save_movies)
 
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
@@ -523,3 +523,66 @@ def test_on_close_saves_settings(app, monkeypatch):
     assert saved["reverse_order"] is True
     assert saved["last_csv"] == "/tmp/w.csv"   # must still be there
     assert boxdlist.VALID_SIZE.fullmatch(saved["window_size"])
+    
+def test_save_movies_round_trip(tmp_path, movies):
+    path = str(tmp_path / "out.csv")
+    save_movies(path, movies)
+    result, ignored = load_movies(path)
+    assert ignored == 0
+    assert result == movies
+    
+def test_save_movies_keeps_commas_in_names(tmp_path):
+    path = str(tmp_path / "out.csv")
+    original = [movie("Movie, with comma")]
+    save_movies(path, original)
+    result, ignored = load_movies(path)
+    assert result == original
+    assert ignored == 0
+    
+def test_export_csv_saves_only_visible_movies(app, movies, tmp_path, monkeypatch):
+    out = tmp_path / "out.csv"
+    # Fake "Save as" window: returns a path instead of asking
+    monkeypatch.setattr(boxdlist.filedialog, "asksaveasfilename",
+                        lambda **kwargs: str(out))
+    app.set_movies(movies)
+    app.search.set("blade")
+    app.update_list()
+    app.export_csv()
+    result, _ = load_movies(str(out))
+    assert names(result) == ["Blade Runner"]
+    
+def test_export_csv_cancel_does_nothing(app, monkeypatch, movies):
+    app.set_movies(movies)
+    # Fake "Save as" window: returns "" to simulate user cancelling
+    monkeypatch.setattr(boxdlist.filedialog, "asksaveasfilename",
+                    lambda **kwargs: "")
+    called = []
+    # Fake save: only records that it was called
+    monkeypatch.setattr(boxdlist, "save_movies",
+                    lambda path, movies: called.append(path))
+    app.export_csv()
+    assert called == []  # save_movies was not called
+    
+def test_export_csv_with_no_movies_shows_message(app, monkeypatch):
+    shown = []
+    monkeypatch.setattr(boxdlist.messagebox, "showinfo",
+                    lambda *args, **kwargs: shown.append(args))
+    app.export_csv()
+    assert len(shown) == 1
+    assert shown[0][1] == "No movies to export."
+    
+def test_buttons_hidden_when_no_visible_movies(app, movies):
+    # empty app: nothing to pick or export
+    assert app.random_button.winfo_manager() == ""
+    assert app.export_button.winfo_manager() == ""
+    assert app.open_button.winfo_manager() == ""
+    app.set_movies(movies)
+    assert app.random_button.winfo_manager() == "pack"
+    assert app.export_button.winfo_manager() == "pack"
+    assert app.open_button.winfo_manager() == "pack"
+    # a search with no results hides them again
+    app.search.set("zzz")
+    app.update_list()
+    assert app.random_button.winfo_manager() == ""
+    assert app.export_button.winfo_manager() == ""
+    assert app.open_button.winfo_manager() == ""

@@ -86,6 +86,19 @@ def load_movies(path: str) -> tuple[list[dict], int]:
             })
     return movies, ignored
 
+def save_movies(path: str, movies: list[dict]) -> None:
+    """Writes the movies to a CSV that load_movies can read again."""
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["Date", "Name", "Year", "Letterboxd URI"])
+        writer.writeheader()   # writes the first line with the column titles
+        for m in movies:
+            writer.writerow({
+                "Date": m["date"],
+                "Name": m["name"],
+                "Year": m["year"],
+                "Letterboxd URI": m["url"],
+            })
+
 
 def is_incomplete(movie: dict) -> bool:
     """True if year, date, or link is missing."""
@@ -304,10 +317,13 @@ class App(tk.Tk):
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(fill="x")
 
-        ttk.Button(bottom, text="Random Movie (Ctrl+R)",
-                   command=self.random_movie).pack(side="left")
-        ttk.Button(bottom, text="Open in Letterboxd (Enter)",
-                   command=self.open_link).pack(side="left", padx=6)
+        # Created now, but placed on screen later by update_buttons
+        self.random_button = ttk.Button(bottom, text="Random Movie (Ctrl+R)",
+                                        command=self.random_movie)
+        self.open_button = ttk.Button(bottom, text="Open in Letterboxd (Enter)",
+                                      command=self.open_link)
+        self.export_button = ttk.Button(bottom, text="Export CSV",
+                                        command=self.export_csv)
 
         self.result = ttk.Label(
             bottom, text="", font=("TkDefaultFont", 11, "bold"))
@@ -442,6 +458,7 @@ class App(tk.Tk):
         self.counter.config(text=f"{len(self.visible)} / {len(self.movies)}")
         self.update_headers()
         self.update_warning()
+        self.update_buttons()
 
     def update_headers(self) -> None:
         """Shows ▲ / ▼ on the column currently used for sorting."""
@@ -459,6 +476,17 @@ class App(tk.Tk):
             self.warning.place_forget()
             return
         self.warning.place(relx=0.5, rely=0.4, anchor="center")
+    
+    def update_buttons(self) -> None:
+        """Shows the random and export buttons only when movies are visible."""
+        buttons = (self.open_button, self.random_button, self.export_button)
+        if self.visible:
+            # each one goes right before the result label, so the order stays
+            for button in buttons:
+                button.pack(side="left", padx=(0, 6), before=self.result)
+        else:
+            for button in buttons:
+                button.pack_forget()
 
     # ----- Actions -----
     def sort(self, column: str) -> None:
@@ -531,6 +559,24 @@ class App(tk.Tk):
         name = self.visible[int(sel[0])]["name"]
         self.clipboard_clear()          # empties the clipboard
         self.clipboard_append(name)   # puts the text in it
+        
+    def export_csv(self) -> None:
+        """Saves the movies currently shown to a CSV file."""
+        if not self.visible:
+            messagebox.showinfo("BoxdList", "No movies to export.")
+            return
+        path = filedialog.asksaveasfilename(
+                title="Export CSV",
+                defaultextension=".csv",        # adds .csv if the user forgets it
+                initialfile="watchlist.csv",    # suggested name
+                filetypes=[("CSV", "*.csv")]
+                )
+        if not path:
+            return
+        try:
+            save_movies(path, self.visible)
+        except OSError as error:
+            messagebox.showerror("Export Error", str(error))
         
     def on_close(self) -> None:
         """Saves the sort and window size, then closes the app."""
