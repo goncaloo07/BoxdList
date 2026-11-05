@@ -5,7 +5,8 @@ import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
-                      valid_reverse_order, save_movies, is_newer, find_installer_url)
+                      valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file)
+import build
 
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
@@ -613,3 +614,106 @@ def test_find_installer_url_returns_none_if_not_found():
 def test_find_installer_url_returns_none_if_no_assets():
     release = {"assets": []}
     assert find_installer_url(release) is None
+    
+# ---------- network (no real internet is used) ----------
+class FakeResponse:
+    """Pretends to be the object that urlopen returns."""
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def fake_urlopen(body: bytes):
+    # Returns a replacement for urlopen that always answers with 'body'
+    return lambda url, timeout=None: FakeResponse(body)
+
+def test_fetch_latest_release_returns_the_data(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        fake_urlopen(b'{"tag_name": "v1.0.9"}'))
+    assert fetch_latest_release() == {"tag_name": "v1.0.9"}
+
+
+def test_fetch_latest_release_invalid_json_returns_none(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        fake_urlopen(b"this is not json"))
+    assert fetch_latest_release() is None
+
+
+def test_fetch_latest_release_ignores_json_that_is_not_a_dict(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        fake_urlopen(b'["not", "a", "dict"]'))
+    assert fetch_latest_release() is None
+
+
+def test_fetch_latest_release_network_error_returns_none(monkeypatch):
+    def no_internet(url, timeout=None):
+        raise OSError("no internet")
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", no_internet)
+    assert fetch_latest_release() is None
+
+
+def test_download_file_success(monkeypatch, tmp_path):
+    calls = []
+    # Fake download: only records what it was asked to download
+    monkeypatch.setattr(boxdlist.urllib.request, "urlretrieve",
+                        lambda url, target: calls.append((url, target)))
+    target = tmp_path / "setup.exe"
+    assert download_file("https://x/setup.exe", target) is True
+    assert calls == [("https://x/setup.exe", target)]
+
+
+def test_download_file_failure_returns_false(monkeypatch, tmp_path):
+    def fail(url, target):
+        raise OSError("connection lost")
+    monkeypatch.setattr(boxdlist.urllib.request, "urlretrieve", fail)
+    assert download_file("https://x/setup.exe", tmp_path / "setup.exe") is False
+
+
+# ---------- build script ----------
+def test_set_app_version_changes_only_that_line(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text('X = 1\nAPP_VERSION = "1.0.0"\nY = 2\n', encoding="utf-8")
+    build.set_app_version("1.0.1", str(path))
+    assert path.read_text(encoding="utf-8") == 'X = 1\nAPP_VERSION = "1.0.1"\nY = 2\n'
+
+
+def test_set_app_version_keeps_windows_line_endings(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_bytes(b'APP_VERSION = "1.0.0"\r\nY = 2\r\n')
+    build.set_app_version("1.0.1", str(path))
+    assert path.read_bytes() == b'APP_VERSION = "1.0.1"\r\nY = 2\r\n'
+
+
+def test_set_app_version_stops_if_line_is_missing(tmp_path):
+    path = tmp_path / "app.py"
+    path.write_text("Y = 2\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        build.set_app_version("1.0.1", str(path))
+    assert path.read_text(encoding="utf-8") == "Y = 2\n"   # file untouched
+
+
+def test_find_iscc_prefers_the_path(monkeypatch):
+    monkeypatch.setattr(build.shutil, "which", lambda name: "C:/tools/ISCC.exe")
+    assert build.find_iscc() == "C:/tools/ISCC.exe"
+
+
+def test_find_iscc_uses_fallback_path(monkeypatch, tmp_path):
+    fake = tmp_path / "ISCC.exe"
+    fake.write_text("", encoding="utf-8")
+    monkeypatch.setattr(build.shutil, "which", lambda name: None)
+    monkeypatch.setattr(build, "ISCC_PATH", str(fake))
+    assert build.find_iscc() == str(fake)
+
+
+def test_find_iscc_returns_none_if_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(build.shutil, "which", lambda name: None)
+    monkeypatch.setattr(build, "ISCC_PATH", str(tmp_path / "nope.exe"))
+    assert build.find_iscc() is None

@@ -7,6 +7,7 @@ from boxdlist import APP_VERSION
 
 INSTALLER = Path("installer_output/BoxdListSetup.exe")
 REPO_URL = "https://github.com/goncaloo07/BoxdList"
+RELEASE_BRANCH = "main"
 
 def ask(question: str) -> bool:
     """Asks a yes/no question. Only 'y' counts as yes."""
@@ -19,7 +20,13 @@ def run(command: list[str]) -> subprocess.CompletedProcess:
 def push() -> None:
     """Pushes the current branch to GitHub."""
     print("Pushing to GitHub...")
-    if subprocess.run(["git", "push"]).returncode != 0:
+    # a brand new branch has no upstream yet, so it needs --set-upstream
+    has_upstream = run(["git", "rev-parse", "--abbrev-ref", "@{u}"]).returncode == 0
+    command = ["git", "push"]
+    if not has_upstream:
+        branch = run(["git", "branch", "--show-current"]).stdout.strip()
+        command = ["git", "push", "--set-upstream", "origin", branch]
+    if subprocess.run(command).returncode != 0:
         sys.exit("git push failed.")
     print("Push done.")
 
@@ -29,6 +36,10 @@ def release(tag: str) -> None:
     # ---------- Checks ----------
     if shutil.which("gh") is None:
         sys.exit("GitHub CLI (gh) is not available.")
+    # the release must come from the main branch
+    branch = run(["git", "branch", "--show-current"]).stdout.strip()
+    if branch != RELEASE_BRANCH:
+        sys.exit(f"You are on '{branch}', not '{RELEASE_BRANCH}'. Switch to it first.")
     if not INSTALLER.is_file():
         sys.exit(f"Installer not found at {INSTALLER}")
     # the installer must be newer than the code, or build.py was not run
@@ -59,7 +70,7 @@ def release(tag: str) -> None:
     description = "\n".join(lines)
     if not description:
         sys.exit("The description cannot be empty.")
-    # ---------- Summary and final confirmation ----------
+    # ---------- Final confirmation ----------
     print(f"\nTitle: {title}")
     print(f"Tag:   {tag}")
     print(f"File:  {INSTALLER}")

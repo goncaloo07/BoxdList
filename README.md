@@ -66,7 +66,19 @@ Run:
 python build.py
 ```
 
-The script asks which version to build (press Enter to keep the current one), writes it into `APP_VERSION` in `boxdlist.py`, runs the tests, builds the app and creates `installer_output/BoxdListSetup.exe`. You may need to change `ISCC_PATH` in `build.py`, depending on where Inno Setup is installed.
+The script asks which version to build (press Enter to keep the current one), runs the tests, writes the version into `APP_VERSION` in `boxdlist.py`, builds the app and creates `installer_output/BoxdListSetup.exe`. It looks for `ISCC.exe` in your PATH first, then at `ISCC_PATH` in `build.py`, so you may need to change that path depending on where Inno Setup is installed.
+
+## Publish a release
+
+Requires the [GitHub CLI](https://cli.github.com/) (`gh`), logged in with `gh auth login`.
+
+After building, commit the changes and run:
+
+```
+python release.py
+```
+
+It asks if you want to push to GitHub, and then if you want to create a release. For the release it asks for a description, shows a summary and asks for a final confirmation. The release is titled `BoxdList vX.Y.Z`, uses the version from `APP_VERSION` as the tag and attaches `BoxdListSetup.exe`. Releases can only be created from the `main` branch.
 
 ## Disclaimer
 
