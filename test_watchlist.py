@@ -5,7 +5,7 @@ import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
-                      valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file)
+                      valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movie)
 import build
 
 
@@ -717,3 +717,137 @@ def test_find_iscc_returns_none_if_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(build.shutil, "which", lambda name: None)
     monkeypatch.setattr(build, "ISCC_PATH", str(tmp_path / "nope.exe"))
     assert build.find_iscc() is None
+    
+# ---------- remove_movie ----------
+def test_remove_movie_removes_only_the_target(movies):
+    result = remove_movie(movies, movies[1])
+    assert names(result) == ["Amélie", "Cidade de Deus", "No Year"]
+
+
+def test_remove_movie_with_duplicates_removes_only_one():
+    # two movies with the same data, but they are different objects
+    first, second = movie("Same"), movie("Same")
+    result = remove_movie([first, second], first)
+    assert len(result) == 1
+    assert result[0] is second
+
+
+def test_remove_movie_does_not_change_original_list(movies):
+    original = list(movies)
+    remove_movie(movies, movies[0])
+    assert movies == original
+
+
+# ---------- delete in the interface ----------
+def confirm_delete(monkeypatch, answer=True):
+    # Fake the "Are you sure?" popup
+    monkeypatch.setattr(boxdlist.messagebox, "askyesno",
+                        lambda *args, **kwargs: answer)
+
+
+def test_delete_selected_updates_list_and_csv(app, movies, tmp_path, monkeypatch):
+    path = str(tmp_path / "w.csv")
+    save_movies(path, movies)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: path)
+    confirm_delete(monkeypatch)
+    app.set_movies(movies)
+    app.table.selection_set("1")   # no sorting, so row 1 is Blade Runner
+    app.delete_selected()
+    assert "Blade Runner" not in table_names(app)
+    assert app.counter.cget("text") == "3 / 3"
+    assert "Blade Runner" not in names(load_movies(path)[0])
+
+
+def test_delete_selected_with_filter_keeps_the_other_movies_in_csv(
+        app, movies, tmp_path, monkeypatch):
+    # The CSV must keep the hidden movies, not only the visible ones
+    path = str(tmp_path / "w.csv")
+    save_movies(path, movies)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: path)
+    confirm_delete(monkeypatch)
+    app.set_movies(movies)
+    app.search.set("blade")
+    app.update_list()
+    app.table.selection_set("0")
+    app.delete_selected()
+    assert names(load_movies(path)[0]) == [
+        "Amélie", "Cidade de Deus", "No Year"]
+
+
+def test_delete_selected_cancel_keeps_everything(app, movies, monkeypatch):
+    confirm_delete(monkeypatch, answer=False)
+    saved = []
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: "/tmp/w.csv")
+    monkeypatch.setattr(boxdlist, "save_movies",
+                        lambda path, items: saved.append(path))
+    app.set_movies(movies)
+    app.table.selection_set("0")
+    app.delete_selected()
+    assert saved == []
+    assert len(app.movies) == 4
+
+
+def test_delete_selected_without_selection_does_nothing(app, movies, monkeypatch):
+    asked = []
+    monkeypatch.setattr(boxdlist.messagebox, "askyesno",
+                        lambda *args, **kwargs: asked.append(1))
+    app.set_movies(movies)
+    app.delete_selected()
+    assert asked == []
+    assert len(app.movies) == 4
+
+
+def test_delete_selected_save_error_keeps_the_movie(app, movies, monkeypatch):
+    errors = []
+    def fail(path, items):
+        raise OSError("disk full")
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: "/tmp/w.csv")
+    monkeypatch.setattr(boxdlist, "save_movies", fail)
+    monkeypatch.setattr(boxdlist.messagebox, "showerror",
+                        lambda *args, **kwargs: errors.append(args))
+    app.set_movies(movies)
+    app.table.selection_set("0")
+    app.delete_selected()
+    assert len(errors) == 1
+    assert len(app.movies) == 4   # the list was not changed
+
+
+def test_delete_selected_without_csv_still_removes_from_list(
+        app, movies, monkeypatch):
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    app.table.selection_set("0")
+    app.delete_selected()
+    assert "Amélie" not in table_names(app)
+
+
+def test_delete_updates_decade_dropdown(app, movies, monkeypatch):
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    assert "1980s" in app.decade.cget("values")
+    app.table.selection_set("1")   # Blade Runner, the only 1980s movie
+    app.delete_selected()
+    assert list(app.decade.cget("values")) == ["All", "2000s"]
+
+
+def test_delete_last_movie_of_selected_decade_resets_filter(
+        app, movies, monkeypatch):
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    app.decade.set("1980s")
+    app.select_decade()
+    app.update_list()
+    assert table_names(app) == ["Blade Runner"]
+    app.table.selection_set("0")
+    app.delete_selected()
+    assert app.decade.get() == "All"
+    assert app.year_min.get() == ""
+    assert len(table_names(app)) == 3
+
+
+def test_delete_key_is_bound(app):
+    assert app.table.bind("<Delete>") != ""

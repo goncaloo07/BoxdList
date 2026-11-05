@@ -39,7 +39,7 @@ VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 
 
@@ -212,6 +212,11 @@ def download_file(url: str, target: Path) -> bool:
         return True
     except OSError:
         return False
+    
+def remove_movie(movies: list[dict], target: dict) -> list[dict]:
+    """Returns a new list without 'target'."""
+    # 'is' compares the exact object, so duplicates are safe
+    return [m for m in movies if m is not target]
 
 # ---------- Configuration (remember the last CSV) ----------
 def read_last_path() -> str | None:
@@ -386,6 +391,7 @@ class App(tk.Tk):
         self.menu = tk.Menu(self, tearoff=0)
         self.menu.add_command(label="Open in Letterboxd", command=self.open_link)
         self.menu.add_command(label="Copy name", command=self.copy_name)
+        self.menu.add_command(label="Delete", command=self.delete_selected)
 
         # ---------- Keyboard Shortcuts ----------
         self.bind("<Control-o>", lambda _: self.import_csv())
@@ -395,6 +401,7 @@ class App(tk.Tk):
         self.bind("<Control-R>", lambda _: self.random_movie())
         self.table.bind("<Return>", lambda _: self.open_link())
         self.table.bind("<Button-3>", self.on_right_click)
+        self.table.bind("<Delete>", lambda _: self.delete_selected())
 
         self.update_list()
         self.load_last_csv()
@@ -446,17 +453,24 @@ class App(tk.Tk):
                 f"{len(movies)} movies imported.\n"
                 f"- {ignored} lines ignored (missing name or malformed)\n"
                 f"- {incomplete} movies with missing data (shown with {EMPTY})")
+        
+    def update_decades(self) -> None:
+        """Refreshes the decade dropdown with the decades that exist in the list."""
+        years = [a for a in (year_as_int(f["year"]) for f in self.movies) if a]
+        decades = sorted({a // 10 * 10 for a in years})
+        values = [NO_FILTER] + [f"{d}s" for d in decades]
+        self.decade.config(values=values)
+        # the selected decade may be gone now: go back to "All"
+        if self.decade.get() not in values:
+            self.decade.set(NO_FILTER)
+            self.select_decade()   # also clears the year fields
 
     def set_movies(self, movies: list[dict]) -> None:
         """Replaces the current watchlist and refreshes everything."""
         self.movies = movies
         self.last_randomized = None
         self.result.config(text="")
-
-        # Updates available decades in the filter dropdown
-        years = [a for a in (year_as_int(f["year"]) for f in movies) if a]
-        decades = sorted({a // 10 * 10 for a in years})
-        self.decade.config(values=[NO_FILTER] + [f"{d}s" for d in decades])
+        self.update_decades()
         self.clear_filters()
         
     def check_for_update(self) -> None:
@@ -676,6 +690,30 @@ class App(tk.Tk):
         name = self.visible[int(sel[0])]["name"]
         self.clipboard_clear()          # empties the clipboard
         self.clipboard_append(name)   # puts the text in it
+        
+    def delete_selected(self) -> None:
+        """Removes the selected movie from the list and from the CSV."""
+        sel = self.table.selection()
+        if not sel:
+            return
+        target = self.visible[int(sel[0])]
+        answer = messagebox.askyesno(
+            "Delete Movie",
+            f"Are you sure you want to delete '{target['name']}' from the list?")
+        if not answer:
+            return
+        remaining = remove_movie(self.movies, target)
+        # save first: if it fails, the list stays as it was
+        path = read_last_path()
+        if path:
+            try:
+                save_movies(path, remaining)
+            except OSError as error:
+                messagebox.showerror("Delete Error", str(error))
+                return
+        self.movies = remaining
+        self.update_decades()
+        self.update_list()
         
     def export_csv(self) -> None:
         """Saves the movies currently shown to a CSV file."""
