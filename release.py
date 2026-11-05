@@ -1,49 +1,54 @@
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-from unittest import result
 from boxdlist import APP_VERSION
 
 INSTALLER = Path("installer_output/BoxdListSetup.exe")
+REPO_URL = "https://github.com/goncaloo07/BoxdList"
 
-def main() -> None:
-    os.chdir(Path(__file__).parent)   # always work from the project folder
-    tag = APP_VERSION
-    if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
-        sys.exit("Git is not available.")
-    if subprocess.run(["gh", "--version"], capture_output=True).returncode != 0:
+def ask(question: str) -> bool:
+    """Asks a yes/no question. Only 'y' counts as yes."""
+    return input(f"{question} (y/n): ").strip().lower() == "y"
+
+def run(command: list[str]) -> subprocess.CompletedProcess:
+    """Runs a command and captures its output as text."""
+    return subprocess.run(command, capture_output=True, text=True)
+
+def push() -> None:
+    """Pushes the current branch to GitHub."""
+    print("Pushing to GitHub...")
+    if subprocess.run(["git", "push"]).returncode != 0:
+        sys.exit("git push failed.")
+    print("Push done.")
+
+def release(tag: str) -> None:
+    """Checks everything, asks for a description and publishes the release."""
+    title = f"BoxdList v{tag}"
+    # ---------- Checks ----------
+    if shutil.which("gh") is None:
         sys.exit("GitHub CLI (gh) is not available.")
     if not INSTALLER.is_file():
         sys.exit(f"Installer not found at {INSTALLER}")
+    # the installer must be newer than the code, or build.py was not run
     if INSTALLER.stat().st_mtime < Path("boxdlist.py").stat().st_mtime:
         sys.exit("The installer is older than boxdlist.py. Run build.py again.")
-    result = subprocess.run(["git", "status", "--porcelain"],
-            capture_output=True, text=True)
-    if result.stdout.strip():
-        sys.exit("Git working directory is not clean. Please commit or stash changes before releasing.")
-    print(f"Ready to release BoxdList v{tag}.")
-    #PUSH
-    d = input("Push to GitHub? (y/n): ").strip().lower()
-    if d != "y":
-        sys.exit("Push cancelled.")
-    else:
-        print("Pushing to GitHub...")
-        result = subprocess.run(["git", "push"])
-        if result.returncode != 0:
-            sys.exit("git push failed. No release was created.")
-    #RELEASE
-    d = input("Create GitHub release? (y/n): ").strip().lower()
-    if d != "y":
-        sys.exit("Release creation cancelled.")
-    result = subprocess.run(["gh", "release", "view", tag],
-                capture_output=True, text=True)
-    if result.returncode == 0:
-        sys.exit(f"Release {tag} already exists. Delete it first if you want to recreate it.")
-    if result.returncode == 0:
-        sys.exit(f"Release {tag} already exists. Delete it first if you want to recreate it.")
-    if result.returncode != 1:
-        sys.exit(f"Could not check the release: {result.stderr.strip()}")
+    # empty output means everything is committed
+    if run(["git", "status", "--porcelain"]).stdout.strip():
+        sys.exit("There are uncommitted changes. Commit them before releasing.")
+    # the commit must be online, so the tag can point to it
+    unpushed = run(["git", "rev-list", "--count", "@{u}..HEAD"])
+    if unpushed.returncode != 0 or unpushed.stdout.strip() != "0":
+        sys.exit("There are commits that were not pushed. "
+                 "Run this script again and answer y to the push question.")
+    # exit code 0 means the release already exists
+    existing = run(["gh", "release", "view", tag])
+    if existing.returncode == 0:
+        sys.exit(f"Release {tag} already exists. Delete it first to recreate it.")
+    if "release not found" not in existing.stderr.lower():
+        sys.exit(f"Could not check the release: {existing.stderr.strip()}")
+    # ---------- Description ----------
     print("Release description (one line per item, empty line to finish):")
     lines = []
     while True:
@@ -53,19 +58,34 @@ def main() -> None:
         lines.append(line)
     description = "\n".join(lines)
     if not description:
-        sys.exit("Release description cannot be empty.")
-    title = f"BoxdList v{tag}"
-    print(f"Creating release: \nTitle: '{title}'\nTag: {tag}\nDescription:\n{description}\nFile: {INSTALLER}")
-    commit = subprocess.run(["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True).stdout.strip()
-    release = subprocess.run(["gh", "release", "create", tag,
-                str(INSTALLER),             # file to attach
-                "--title", title,
-                "--notes", description,
-                "--target", commit])        # the commit the tag points to
-    if release.returncode != 0:
-        sys.exit(f"gh release create failed with exit code {release.returncode}.")
-    print(f"Release {tag} created successfully. You can view it at https://github.com/goncaloo07/BoxdList/releases/tag/{tag}")
+        sys.exit("The description cannot be empty.")
+    # ---------- Summary and final confirmation ----------
+    print(f"\nTitle: {title}")
+    print(f"Tag:   {tag}")
+    print(f"File:  {INSTALLER}")
+    print(f"Notes:\n{description}\n")
+    if not ask("Publish this release?"):
+        sys.exit("Cancelled. Nothing was published.")
+    # ---------- Create the release ----------
+    commit = run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    print("Creating the release...")
+    created = subprocess.run(["gh", "release", "create", tag,
+                              str(INSTALLER),          # file to attach
+                              "--title", title,
+                              "--notes", description,
+                              "--target", commit])     # commit the tag points to
+    if created.returncode != 0:
+        sys.exit(f"gh release create failed (code {created.returncode}).")
+    print(f"Released {title}: {REPO_URL}/releases/tag/{tag}")
+
+def main() -> None:
+    os.chdir(Path(__file__).parent)
+    if shutil.which("git") is None:
+        sys.exit("Git is not available.")
+    if ask("Push to GitHub?"):
+        push()
+    if ask(f"Create a GitHub release for v{APP_VERSION}?"):
+        release(APP_VERSION)
 
 if __name__ == "__main__":
     main()
