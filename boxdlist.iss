@@ -8,7 +8,7 @@
 ; Fixed ID so a new version replaces the old one instead of installing twice
 AppId={{8F3B2A71-5C4D-4E9A-B6D1-2A7E9C1F4D30}
 AppName=BoxdList
-AppVersion=1.0.6
+AppVersion=1.0.7
 AppPublisher=Gonçalo Pinto
 ; Installs in the user folder, so no admin rights are needed
 ; and the data folder next to the .exe stays writable

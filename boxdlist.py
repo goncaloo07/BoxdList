@@ -39,7 +39,7 @@ VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 
 
@@ -276,7 +276,7 @@ class App(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("BoxdList")
+        self.title(f"BoxdList {APP_VERSION}")
         config = read_config()
         self.geometry(valid_window_size(config.get("window_size")))
         self.minsize(700, 400)
