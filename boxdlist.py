@@ -32,14 +32,14 @@ COLUMNS = (("name", "Movie", 440),
            ("date", "Added", 110))
 MANDATORY = {"Date", "Name", "Year", "Letterboxd URI"}
 CONFIG_FILE = app_folder() / "data" / "boxdlist_config.json"
-SEARCH_DELAY_MS = 200  # wait after the last keypress before filtering
+SEARCH_DELAY_MS = 150  # wait after the last keypress before filtering
 NO_FILTER = "All"
 EMPTY = "—"            # shown in the table when data is missing
 VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 
 
@@ -276,7 +276,7 @@ class App(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"BoxdList {APP_VERSION}")
+        self.title(f"BoxdList v{APP_VERSION}")
         config = read_config()
         self.geometry(valid_window_size(config.get("window_size")))
         self.minsize(700, 400)
@@ -290,6 +290,7 @@ class App(tk.Tk):
         self.update_version: str | None = None
         self.update_url: str | None = None
         self._search_job = None          # pending after() ID (debounce)
+        self.downloading = False   # True while the installer is being downloaded
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # ---------- Row 1: Import, search, and counter ----------
@@ -477,21 +478,24 @@ class App(tk.Tk):
         self.ask_update()
         
     def ask_update(self) -> None:
+        if self.downloading:
+            return  # a download is already running
         answer = messagebox.askyesno(
-        "Update available",
-        f"Version {self.update_version} is available. Update now?")
-        if answer:
-            self.update_label.pack_forget()
-            if self.update_url:
-                target = Path(tempfile.gettempdir()) / "BoxdListSetup.exe"
-                if download_file(self.update_url, target):
-                    self.install_update(target)
-                else:
-                    messagebox.showerror("Update", "Download failed.")
-            else:
-                messagebox.showerror("Update Error", "Could not find the installer link.")
-        else: 
+            "Update available",
+            f"Version {self.update_version} is available. Update now?")
+        if not answer:
             self.update_label.pack(side="right", padx=8)
+            return
+        if not self.update_url:
+            messagebox.showerror("Update Error", "Could not find the installer link.")
+            self.update_label.pack(side="right", padx=8)
+            return
+        self.downloading = True
+        self.update_label.config(text="Downloading update...")
+        self.update_label.pack(side="right", padx=8)
+        target = Path(tempfile.gettempdir()) / "BoxdListSetup.exe"
+        threading.Thread(target=self._download_worker,
+                        args=(self.update_url, target), daemon=True).start()
         
     def install_update(self, installer: Path) -> None:
         try:
@@ -499,8 +503,24 @@ class App(tk.Tk):
             subprocess.Popen([str(installer), "/SILENT", "/CLOSEAPPLICATIONS"])
         except OSError:
             messagebox.showerror("Update", "Could not start the installer.")
+            self.update_label.config(text="Update pending")   # let the user try again
             return
         self.on_close()
+        
+    def _download_worker(self, url: str, target: Path) -> None:
+        ok = download_file(url, target)   # slow part, runs in the background
+        # tkinter is not thread safe: hand the result to the main thread
+        self.after(0, self._on_download_done, ok, target)
+
+    def _on_download_done(self, ok: bool, target: Path) -> None:
+        self.downloading = False
+        if ok:
+            self.install_update(target)
+        else:
+            messagebox.showerror("Update", "Download failed.")
+            # let the user try again
+            self.update_label.pack(side="right", padx=8)
+            self.update_label.config(text="Update pending")
 
     # ----- Filters -----
     def select_decade(self) -> None:

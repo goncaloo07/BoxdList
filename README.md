@@ -15,6 +15,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Double-click a film (or press `Enter`) to open its Letterboxd page
 - Remembers the last CSV you imported
 - Warns you about malformed rows and films with missing data
+- Checks for new versions on startup and offers to update (The update check only runs in the installed version)
 
 ## Getting your watchlist from Letterboxd
 
@@ -55,20 +56,17 @@ pip install -r requirements.txt
 python -m pytest
 ```
 
-## Build the executable
+## Build the installer (Windows only)
+
+Requires [Inno Setup 7](https://jrsoftware.org/isinfo.php) and PyInstaller (`pip install pyinstaller`).
+
+Run:
 
 ```
-pip install pyinstaller
-pyinstaller --windowed --name BoxdList --icon assets/boxdlist.ico --add-data "assets/boxdlist.ico;assets" boxdlist.py
+python build.py
 ```
 
-### Build the installer
-
-Install [Inno Setup](https://jrsoftware.org/isinfo.php), build the executable as above, then open `boxdlist.iss` and press `Ctrl+F9`. The installer is created in `installer_output/`.
-
-The result is in `dist/BoxdList/`.
-
-The `--add-data` part copies the icon into the build so the window and taskbar can show it. On Linux and macOS, use `:` instead of `;` as the separator.
+The script asks which version to build (press Enter to keep the current one), writes it into `APP_VERSION` in `boxdlist.py`, runs the tests, builds the app and creates `installer_output/BoxdListSetup.exe`. You may need to change `ISCC_PATH` in `build.py`, depending on where Inno Setup is installed.
 
 ## Disclaimer
 
