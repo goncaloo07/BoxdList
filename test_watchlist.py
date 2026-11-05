@@ -5,7 +5,7 @@ import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
-                      valid_reverse_order, save_movies)
+                      valid_reverse_order, save_movies, is_newer, find_installer_url)
 
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
@@ -586,3 +586,30 @@ def test_buttons_hidden_when_no_visible_movies(app, movies):
     assert app.random_button.winfo_manager() == ""
     assert app.export_button.winfo_manager() == ""
     assert app.open_button.winfo_manager() == ""
+    
+@pytest.mark.parametrize("latest, current, expected", [
+    ("v1.0.7", "1.0.6", True),
+    ("v1.0.10", "1.0.9", True),
+    ("v1.0.6", "1.0.6", False),
+    ("v1.0.5", "1.0.6", False),
+    ("abc", "1.0.6", False)
+])
+def test_is_newer(latest, current, expected):
+    assert is_newer(latest, current) == expected
+
+def test_find_installer_url_finds_the_exe():
+    release = {"assets": [
+        {"name": "other.zip", "browser_download_url": "https://x/other.zip"},
+        {"name": "BoxdListSetup.exe", "browser_download_url": "https://x/setup.exe"},
+    ]}
+    assert find_installer_url(release) == "https://x/setup.exe"
+    
+def test_find_installer_url_returns_none_if_not_found():
+    release = {"assets": [
+        {"name": "other.zip", "browser_download_url": "https://x/other.zip"},
+    ]}
+    assert find_installer_url(release) is None
+    
+def test_find_installer_url_returns_none_if_no_assets():
+    release = {"assets": []}
+    assert find_installer_url(release) is None

@@ -14,6 +14,10 @@ import unicodedata
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+import urllib.request
+import threading
+import tempfile
+import subprocess
   
 def app_folder() -> Path:
     """Folder of the .exe when frozen, or of this file when running the code."""
@@ -35,6 +39,8 @@ VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
+APP_VERSION = "1.0.6"
+RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 
 
 # ---------- Logic (pure functions, easy to test) ----------
@@ -167,6 +173,45 @@ def pick_random(movies: list[dict], last: dict | None) -> dict:
     candidates = [f for f in movies if f is not last]
     return random.choice(candidates or movies)
 
+def parse_version(tag: str) -> tuple[int, ...]:
+    """Turns 'v1.0.10' into (1, 0, 10)."""
+    return tuple(int(n) for n in tag.lstrip("v").split("."))
+
+def is_newer(latest: str, current: str) -> bool:
+    """True only if 'latest' is a higher version than 'current'."""
+    try:
+        return parse_version(latest) > parse_version(current)
+    except ValueError:
+        return False   # strange version text: treat it as "no update"
+    
+def fetch_latest_release() -> dict | None:
+    """Returns the latest release info, or None if anything fails."""
+    try:
+        # opens the address and waits at most 5 seconds for an answer
+        with urllib.request.urlopen(RELEASES_API, timeout=5) as response:
+            text = response.read().decode("utf-8")   # the answer, as text
+        data = json.loads(text)   # turns the text into a Python dict
+        if isinstance(data, dict):
+            return data
+        return None
+    except (OSError, ValueError):
+        return None
+    
+def find_installer_url(release: dict) -> str | None:
+    """Returns the download link of BoxdListSetup.exe, or None if missing."""
+    for release_asset in release.get("assets", []):
+        if release_asset.get("name") == "BoxdListSetup.exe":
+            return release_asset.get("browser_download_url")
+    return None
+
+def download_file(url: str, target: Path) -> bool:
+    """Downloads 'url' into 'target'. Returns True if it worked."""
+    # saves what is at the address directly into the file
+    try:
+        urllib.request.urlretrieve(url, target)
+        return True
+    except OSError:
+        return False
 
 # ---------- Configuration (remember the last CSV) ----------
 def read_last_path() -> str | None:
@@ -242,6 +287,8 @@ class App(tk.Tk):
         self.sort_column = valid_sort_column(config.get("sort_column"))
         self.reverse_order = valid_reverse_order(config.get("reverse_order"))
         self.last_randomized: dict | None = None
+        self.update_version: str | None = None
+        self.update_url: str | None = None
         self._search_job = None          # pending after() ID (debounce)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -260,6 +307,10 @@ class App(tk.Tk):
 
         self.counter = ttk.Label(top, text="")
         self.counter.pack(side="right")
+        
+        self.update_label = ttk.Label(top, text="Update pending",
+                              foreground="orange", cursor="hand2")
+        self.update_label.bind("<Button-1>", lambda _: self.ask_update())   
 
         # ---------- Row 2: Year filters and decade dropdown ----------
         filters = ttk.Frame(self, padding=(8, 0, 8, 6))
@@ -346,6 +397,8 @@ class App(tk.Tk):
 
         self.update_list()
         self.load_last_csv()
+        if getattr(sys, "frozen", False):
+            self.check_for_update()
 
     def set_icon(self) -> None:
         """Sets the app icon on the window and taskbar."""
@@ -404,6 +457,50 @@ class App(tk.Tk):
         decades = sorted({a // 10 * 10 for a in years})
         self.decade.config(values=[NO_FILTER] + [f"{d}s" for d in decades])
         self.clear_filters()
+        
+    def check_for_update(self) -> None:
+        """Starts the check in the background so the window never freezes."""
+        threading.Thread(target=self._check_worker, daemon=True).start()
+
+    def _check_worker(self) -> None:
+        release = fetch_latest_release()
+        # tkinter is not thread safe: hand the result to the main thread
+        self.after(0, self._on_update_result, release)
+    
+    def _on_update_result(self, release: dict | None) -> None:
+        if not release:
+            return  # network error or invalid JSON: ignore it
+        if not is_newer(release.get("tag_name", ""), APP_VERSION):
+            return  # no new version available
+        self.update_version = release.get("tag_name", "").lstrip("v")
+        self.update_url = find_installer_url(release)
+        self.ask_update()
+        
+    def ask_update(self) -> None:
+        answer = messagebox.askyesno(
+        "Update available",
+        f"Version {self.update_version} is available. Update now?")
+        if answer:
+            self.update_label.pack_forget()
+            if self.update_url:
+                target = Path(tempfile.gettempdir()) / "BoxdListSetup.exe"
+                if download_file(self.update_url, target):
+                    self.install_update(target)
+                else:
+                    messagebox.showerror("Update", "Download failed.")
+            else:
+                messagebox.showerror("Update Error", "Could not find the installer link.")
+        else: 
+            self.update_label.pack(side="right", padx=8)
+        
+    def install_update(self, installer: Path) -> None:
+        try:
+            # starts the installer as a separate program; our app does not wait for it
+            subprocess.Popen([str(installer), "/SILENT", "/CLOSEAPPLICATIONS"])
+        except OSError:
+            messagebox.showerror("Update", "Could not start the installer.")
+            return
+        self.on_close()
 
     # ----- Filters -----
     def select_decade(self) -> None:

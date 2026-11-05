@@ -34,9 +34,9 @@ Then, in BoxdList, click **Import CSV** (or press `Ctrl+O`) and select the file.
 
 ## Download
 
-Grab the latest build from the [Releases](../../releases) page, unzip it and run `BoxdList.exe`.
+Grab `BoxdListSetup.exe` from the [Releases](../../releases) page and run it. After installing, press the Windows key and type "BoxdList" to open the app.
 
-> Windows SmartScreen may warn you because the executable is not signed. Click **More info** and then **Run anyway**.
+> Windows SmartScreen may warn you because the installer is not signed. Click **More info** and then **Run anyway**.
 
 ## Run from source
 
@@ -61,6 +61,10 @@ python -m pytest
 pip install pyinstaller
 pyinstaller --windowed --name BoxdList --icon assets/boxdlist.ico --add-data "assets/boxdlist.ico;assets" boxdlist.py
 ```
+
+### Build the installer
+
+Install [Inno Setup](https://jrsoftware.org/isinfo.php), build the executable as above, then open `boxdlist.iss` and press `Ctrl+F9`. The installer is created in `installer_output/`.
 
 The result is in `dist/BoxdList/`.
 

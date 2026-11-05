@@ -10,3 +10,5 @@ venv/
 *.csv
 data/
 ideas.txt
+installer_output/
+howto.txt
