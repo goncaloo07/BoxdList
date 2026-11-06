@@ -13,11 +13,12 @@ import tkinter as tk
 import unicodedata
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk, font
 import urllib.request
 import threading
 import tempfile
 import subprocess
+import ctypes
   
 def app_folder() -> Path:
     """Folder of the .exe when frozen, or of this file when running the code."""
@@ -39,8 +40,22 @@ VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
+
+# Letterboxd-inspired palette
+BG = "#14181C"            # window background
+SURFACE = "#1F252B"       # table, text boxes, buttons
+TEXT = "#CDD6DE"          # normal text
+MUTED = "#99AABB"         # secondary text
+GREEN = "#406A52"         # soft green for big areas
+GREEN_HOVER = "#4F7F65"   # lighter green for the main button on hover
+ORANGE = "#FFB000"        # update warning
+BLUE = "#40BCF4"          # detail color
+ROW_ALT = "#262D34"       # alternate table rows and button hover
+SCROLL = "#3A444D"        # scrollbar thumb
+LOGO_GREEN = "#00E054"    # logo only, small area so the bright green is fine
+LOGO_ORANGE = "#FF8000"   # logo only
 
 
 # ---------- Logic (pure functions, easy to test) ----------
@@ -274,6 +289,26 @@ def resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
     return base / relative
 
+def enable_dpi_awareness() -> None:
+    """Tells Windows the app handles screen scaling itself (sharp text)."""
+    if sys.platform != "win32":
+        return  # ctypes.windll only exists on Windows
+    try:
+        # 2 = per monitor aware, the best option on Windows 8.1 and newer
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (OSError, AttributeError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()   # older Windows
+        except (OSError, AttributeError):
+            pass  # not critical, the app still works, just a bit blurry
+        
+def rounded_points(x1: float, y1: float, x2: float, y2: float, r: float) -> list[float]:
+    """Points of a rounded rectangle, to draw with a smooth canvas polygon."""
+    # each corner point is repeated so the curve stays tight
+    return [x1 + r, y1, x1 + r, y1, x2 - r, y1, x2 - r, y1, x2, y1,
+            x2, y1 + r, x2, y1 + r, x2, y2 - r, x2, y2 - r, x2, y2,
+            x2 - r, y2, x2 - r, y2, x1 + r, y2, x1 + r, y2, x1, y2,
+            x1, y2 - r, x1, y2 - r, x1, y1 + r, x1, y1 + r, x1, y1]
 
 # ---------- Interface ----------
 class App(tk.Tk):
@@ -283,9 +318,15 @@ class App(tk.Tk):
         super().__init__()
         self.title(f"BoxdList v{APP_VERSION}")
         config = read_config()
-        self.geometry(valid_window_size(config.get("window_size")))
-        self.minsize(700, 400)
+        size = valid_window_size(config.get("window_size"))
+        if size == DEFAULT_SIZE:
+            # only the default needs scaling; a saved size is already in real pixels
+            w, h = size.split("x")
+            size = f"{self.px(int(w))}x{self.px(int(h))}"
+        self.geometry(size)
+        self.minsize(self.px(700), self.px(400))
         self.set_icon()
+        self.apply_theme()
 
         self.movies: list[dict] = []     # original list, in CSV order
         self.visible: list[dict] = []    # filtered and sorted (what is seen)
@@ -297,43 +338,56 @@ class App(tk.Tk):
         self._search_job = None          # pending after() ID (debounce)
         self.downloading = False   # True while the installer is being downloaded
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+        # ---------- Header: logo and app name ----------
+        header = ttk.Frame(self, padding=(self.px(12), self.px(10), self.px(12), 0))
+        header.pack(fill="x")
+        self.build_logo(header).pack(side="left")
+        ttk.Label(header, text="BoxdList", font=("Segoe UI", 11, "bold")).pack(
+                  side="left", padx=(self.px(8), 0))
+        tk.Frame(self, height=self.px(1), bg=ROW_ALT, bd=0,
+                 highlightthickness=0, padx=self.px(12)).pack(fill="x", pady=(self.px(10), 0))
 
         # ---------- Row 1: Import, search, and counter ----------
-        top = ttk.Frame(self, padding=8)
+        top = ttk.Frame(self, padding=(self.px(12), self.px(12),
+                                       self.px(12), self.px(8)))
         top.pack(fill="x")
 
         ttk.Button(top, text="Import CSV (Ctrl+O)",
-                   command=self.import_csv).pack(side="left", padx=(0, 10))
+                   command=self.import_csv).pack(side="left", padx=(0, self.px(10)))
 
-        ttk.Label(top, text="Search:").pack(side="left")
         self.search = tk.StringVar()
         self.search.trace_add("write", lambda *_: self.schedule_update())
         self.search_entry = ttk.Entry(top, textvariable=self.search)
-        self.search_entry.pack(side="left", fill="x", expand=True, padx=6)
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=self.px(8))
+        self.add_placeholder(self.search_entry, self.search, "Search movies...")
 
         self.counter = ttk.Label(top, text="")
         self.counter.pack(side="right")
         
         self.update_label = ttk.Label(top, text="Update pending",
-                              foreground="orange", cursor="hand2")
+                              foreground=ORANGE, cursor="hand2")
         self.update_label.bind("<Button-1>", lambda _: self.ask_update())   
 
         # ---------- Row 2: Year filters and decade dropdown ----------
-        filters = ttk.Frame(self, padding=(8, 0, 8, 6))
+        filters = ttk.Frame(self, padding=(self.px(12), 0, self.px(12), self.px(8)))
         filters.pack(fill="x")
 
-        ttk.Label(filters, text="Years from:").pack(side="left")
         self.year_min = tk.StringVar()
-        ttk.Entry(filters, textvariable=self.year_min, width=6).pack(
-            side="left", padx=4)
-        ttk.Label(filters, text="to").pack(side="left")
+        year_min_entry = ttk.Entry(filters, textvariable=self.year_min, width=10)
+        year_min_entry.pack(side="left", padx=(0, self.px(6)))
+        self.add_placeholder(year_min_entry, self.year_min, "From Year")
+
         self.year_max = tk.StringVar()
-        ttk.Entry(filters, textvariable=self.year_max, width=6).pack(
-            side="left", padx=4)
+        year_max_entry = ttk.Entry(filters, textvariable=self.year_max, width=10)
+        year_max_entry.pack(side="left", padx=(0, self.px(6)))
+        self.add_placeholder(year_max_entry, self.year_max, "To Year")
+
         for var in (self.year_min, self.year_max):
             var.trace_add("write", lambda *_: self.schedule_update())
 
-        ttk.Label(filters, text="Decade:").pack(side="left", padx=(14, 4))
+        ttk.Label(filters, text="Decade", foreground=MUTED).pack(
+            side="left", padx=(self.px(10), self.px(6)))
         self.decade = ttk.Combobox(filters, state="readonly", width=8,
                                    values=[NO_FILTER])
         self.decade.set(NO_FILTER)
@@ -341,14 +395,14 @@ class App(tk.Tk):
         self.decade.bind("<<ComboboxSelected>>", lambda _: self.select_decade())
 
         ttk.Button(filters, text="Clear filters",
-                   command=self.clear_filters).pack(side="left", padx=14)
+                   command=self.clear_filters).pack(side="left", padx=self.px(10))
 
         # Red message for invalid year fields (empty when everything is fine)
         self.year_error = ttk.Label(filters, text="", foreground="red")
         self.year_error.pack(side="left")
 
         # ---------- Table ----------
-        middle = ttk.Frame(self, padding=(8, 0))
+        middle = ttk.Frame(self, padding=(self.px(12), 0))
         middle.pack(fill="both", expand=True)
 
         self.table = ttk.Treeview(
@@ -357,38 +411,45 @@ class App(tk.Tk):
             # c=col fixes the value of col in each loop iteration
             self.table.heading(col, text=title,
                                command=lambda c=col: self.sort(c))
-            self.table.column(col, width=width, anchor="w")
+            self.table.column(col, width=self.px(width), anchor="w")
+
+        # Alternating row colors act as a soft divider between rows
+        self.table.tag_configure("even", background=SURFACE)
+        self.table.tag_configure("odd", background=ROW_ALT)
 
         scrollbar = ttk.Scrollbar(middle, orient="vertical",
                                   command=self.table.yview)
         self.table.configure(yscrollcommand=scrollbar.set)
         self.table.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        scrollbar.pack(side="right", fill="y", padx=(self.px(4), 0))
 
         # Warning message overlay when there is nothing to display
-        self.warning = ttk.Label(self.table, text="", foreground="gray")
+        self.warning = ttk.Label(self.table, text="", foreground=MUTED)
 
         self.table.bind("<Double-1>", self.on_double_click)
 
         # ---------- Bottom Section ----------
-        bottom = ttk.Frame(self, padding=8)
+        bottom = ttk.Frame(self, padding=self.px(12))
         bottom.pack(fill="x")
 
         # Created now, but placed on screen later by update_buttons
         self.random_button = ttk.Button(bottom, text="Random Movie (Ctrl+R)",
+                                        style="Accent.TButton",
                                         command=self.random_movie)
         self.open_button = ttk.Button(bottom, text="Open in Letterboxd (Enter)",
                                       command=self.open_link)
         self.export_button = ttk.Button(bottom, text="Export CSV",
                                         command=self.export_csv)
 
-        self.result = ttk.Label(
-            bottom, text="", font=("TkDefaultFont", 11, "bold"))
-        self.result.pack(side="left", padx=12)
+        self.result = ttk.Label(bottom, text="", font=("Segoe UI", 11, "bold"),
+                                foreground=GREEN)
+        self.result.pack(side="left", padx=self.px(12))
         
         # ---------- Right click menu ------------
-        # tearoff=0 removes the dotted line at the top of the menu
-        self.menu = tk.Menu(self, tearoff=0)
+        # Dark colors, and tearoff=0 removes the dotted line at the top
+        self.menu = tk.Menu(self, tearoff=0, bg=SURFACE, fg=TEXT,
+                            activebackground=GREEN, activeforeground=TEXT,
+                            borderwidth=0, relief="flat")
         self.menu.add_command(label="Open in Letterboxd", command=self.open_link)
         self.menu.add_command(label="Copy name", command=self.copy_name)
         self.menu.add_command(label="Delete", command=self.delete_selected)
@@ -403,6 +464,7 @@ class App(tk.Tk):
         self.table.bind("<Button-3>", self.on_right_click)
         self.table.bind("<Delete>", lambda _: self.delete_selected())
 
+        self.dark_title_bar()   # ask Windows for a dark title bar
         self.update_list()
         self.load_last_csv()
         if getattr(sys, "frozen", False):
@@ -419,7 +481,147 @@ class App(tk.Tk):
                 self.iconphoto(True, self.icon)  # keep a reference or it disappears
         except tk.TclError:
             pass  # the app still works without an icon
+    
+    def px(self, value: int) -> int:
+        """Scales a pixel value to the screen DPI (100% scale = no change)."""
+        # "tk scaling" is pixels per point; 96 DPI equals 96/72
+        return round(value * float(self.tk.call("tk", "scaling")) / (96 / 72))
+    
+    def add_placeholder(self, entry: ttk.Entry, var: tk.StringVar, text: str) -> None:
+        """Shows grey hint text inside an empty entry, without touching its value."""
+        # A label on top of the entry, so var.get() stays "" when empty
+        hint = ttk.Label(entry, text=text, style="Hint.TLabel", cursor="xterm")
+        hint.bind("<Button-1>", lambda _: entry.focus_set())  # click goes to the entry
 
+        def toggle(*_) -> None:
+            if var.get():
+                hint.place_forget()   # something typed: hide the hint
+            else:
+                hint.place(x=self.px(9), rely=0.5, anchor="w")
+
+        var.trace_add("write", toggle)
+        toggle()
+        
+    def build_logo(self, parent) -> tk.Canvas:
+        """Draws the BoxdList logo with shapes, so no image file is needed."""
+        width = self.px(26)     # logo width on screen, change this to resize it
+        k = width / 320         # scale from the logo design (320 wide) to screen pixels
+        canvas = tk.Canvas(parent, width=width, height=round(250 * k),
+                        bg=BG, highlightthickness=0, bd=0)
+
+        def at(x: float, y: float) -> tuple[float, float]:
+            # moves a logo coordinate to canvas pixels
+            return (x - 96) * k, (y - 131) * k
+
+        # three cards, from back to front (x, y, color)
+        cards = ((168, 139, BLUE), (136, 171, LOGO_GREEN), (104, 203, LOGO_ORANGE))
+        for x, y, color in cards:
+            x1, y1 = at(x, y)
+            x2, y2 = at(x + 240, y + 170)
+            canvas.create_polygon(rounded_points(x1, y1, x2, y2, 28 * k),
+                                smooth=True, fill=color, outline=BG,
+                                width=max(1, round(8 * k)))
+        # play triangle on the front card
+        triangle = [*at(208, 260), *at(208, 316), *at(252, 288)]
+        canvas.create_polygon(triangle, fill=BG, outline=BG,
+                            width=max(1, round(12 * k)))
+        return canvas
+
+    def apply_theme(self) -> None:
+        """Applies the Letterboxd colors to the whole window."""
+        style = ttk.Style(self)
+        style.theme_use("clam")         # the theme that accepts custom colors
+        self.configure(bg=BG)           # the window itself (not a ttk widget)
+        # Give every default Tk font the same family and size
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            font.nametofont(name).configure(family="Segoe UI", size=9)
+        # "TFrame" means every ttk.Frame in the app
+        style.configure("TFrame", background=BG)
+        # Text labels
+        style.configure("TLabel", background=BG, foreground=TEXT)
+        # Secondary buttons: quiet, they only lighten a little on hover
+        style.configure("TButton", background=SURFACE, foreground=TEXT,
+                        borderwidth=0, padding=(self.px(10), self.px(5)),
+                        bordercolor=SURFACE, lightcolor=SURFACE,
+                        darkcolor=SURFACE, focuscolor=SURFACE)
+        style.map("TButton",
+                  background=[("active", ROW_ALT)],
+                  foreground=[("active", TEXT)])
+        # Main button: always green, so it stands out from the others
+        style.configure("Accent.TButton", background=GREEN, foreground=TEXT,
+                        borderwidth=0, padding=(self.px(10), self.px(5)),
+                        bordercolor=GREEN, lightcolor=GREEN,
+                        darkcolor=GREEN, focuscolor=GREEN)
+        style.map("Accent.TButton",
+                  background=[("active", GREEN_HOVER)],
+                  foreground=[("active", TEXT)])
+        # Grey hint text that sits inside the text boxes
+        style.configure("Hint.TLabel", background=SURFACE, foreground=MUTED)
+        # Text boxes (insertcolor is the blinking cursor)
+        style.configure("TEntry", background=SURFACE, fieldbackground=SURFACE,
+                        foreground=TEXT, insertcolor=TEXT, bordercolor=SURFACE,
+                        lightcolor=SURFACE, darkcolor=SURFACE,
+                        padding=(self.px(6), self.px(4)))
+        # Keep the border flat even when the box has focus
+        style.map("TEntry",
+                  bordercolor=[("focus", SURFACE)],
+                  lightcolor=[("focus", SURFACE)],
+                  darkcolor=[("focus", SURFACE)])
+        # Table rows, and the selected row in green
+        style.configure("Treeview", background=SURFACE, fieldbackground=SURFACE,
+                        foreground=TEXT, bordercolor=SURFACE, lightcolor=SURFACE,
+                        darkcolor=SURFACE, rowheight=self.px(28), borderwidth=0)
+        style.map("Treeview",
+                  background=[("selected", GREEN)],
+                  foreground=[("selected", TEXT)])
+        # Column titles
+        style.configure("Treeview.Heading", background=BG, foreground=MUTED,
+                        relief="flat", bordercolor=SURFACE, lightcolor=SURFACE,
+                        darkcolor=SURFACE, padding=(self.px(8), self.px(5)),
+                        font=("Segoe UI", 10, "bold"))
+        # Decade dropdown (the map is needed because it is readonly)
+        style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE,
+                        foreground=TEXT, arrowcolor=TEXT, bordercolor=SURFACE,
+                        lightcolor=SURFACE, darkcolor=SURFACE,
+                        padding=(self.px(6), self.px(4)))
+        style.map("TCombobox", fieldbackground=[("readonly", SURFACE)])
+        # The list that opens from the dropdown is not a ttk widget,
+        # so it is styled with global options
+        self.option_add("*TCombobox*Listbox.background", SURFACE)
+        self.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", GREEN)
+        self.option_add("*TCombobox*Listbox.selectForeground", TEXT)
+        # Scrollbar: dark track, green thumb when the mouse is over it
+        style.layout("Vertical.TScrollbar",
+             [("Vertical.Scrollbar.trough",
+               {"sticky": "ns",
+                "children": [("Vertical.Scrollbar.thumb",
+                              {"expand": "1", "sticky": "nswe"})]})])
+        # arrowsize also sets the bar width
+        style.configure("TScrollbar", background=SCROLL, troughcolor=BG,
+                        bordercolor=BG, lightcolor=SCROLL, darkcolor=SCROLL,
+                        arrowsize=self.px(10), gripcount=0)
+        # Thumb turns green when the mouse is over it
+        style.map("TScrollbar", background=[("active", GREEN)])
+        
+    def dark_title_bar(self) -> None:
+        """Asks Windows to draw the title bar in dark mode."""
+        if sys.platform != "win32":
+            return  # ctypes.windll only exists on Windows
+        try:
+            self.update()  # the window must exist before it has a handle
+            # winfo_id is the inner frame, GetParent gives the real window
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            value = ctypes.c_int(1)  # 1 = dark mode on
+            # 20 works on recent Windows, 19 on some older Windows 10 builds
+            for attribute in (20, 19):
+                result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
+                if result == 0:  # 0 means it worked
+                    break
+        except (OSError, AttributeError):
+            pass  # not critical: the app still works with a light title bar
+        
     # ----- Data Loading -----
     def load_last_csv(self) -> None:
         """On startup, attempts to reload the last used CSV."""
@@ -583,7 +785,9 @@ class App(tk.Tk):
         self.table.delete(*self.table.get_children())
         # iid = index in self.visible, to recover the selected movie
         for i, f in enumerate(self.visible):
-            self.table.insert("", "end", iid=str(i),
+            # Even rows are plain, odd rows are slightly lighter
+            tag = "odd" if i % 2 else "even"
+            self.table.insert("", "end", iid=str(i), tags=(tag,),
                               values=(f["name"], f["year"] or EMPTY, f["date"] or EMPTY))
 
         self.counter.config(text=f"{len(self.visible)} / {len(self.movies)}")
@@ -609,12 +813,12 @@ class App(tk.Tk):
         self.warning.place(relx=0.5, rely=0.4, anchor="center")
     
     def update_buttons(self) -> None:
-        """Shows the random and export buttons only when movies are visible."""
-        buttons = (self.open_button, self.random_button, self.export_button)
+        """Shows the random, open and export buttons only when movies are visible."""
+        buttons = (self.random_button, self.open_button, self.export_button)
         if self.visible:
             # each one goes right before the result label, so the order stays
             for button in buttons:
-                button.pack(side="left", padx=(0, 6), before=self.result)
+                button.pack(side="left", padx=(0, self.px(6)), before=self.result)
         else:
             for button in buttons:
                 button.pack_forget()
@@ -744,4 +948,5 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
+    enable_dpi_awareness()   # must run before the window is created
     App().mainloop()
