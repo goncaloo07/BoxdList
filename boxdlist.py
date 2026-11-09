@@ -40,7 +40,7 @@ VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 
 # Letterboxd-inspired palette
@@ -233,6 +233,15 @@ def remove_movie(movies: list[dict], target: dict) -> list[dict]:
     # 'is' compares the exact object, so duplicates are safe
     return [m for m in movies if m is not target]
 
+def movie_key(movie: dict) -> tuple[str, str]:
+    """What identifies a movie: name + year."""
+    return (movie["name"], movie["year"])
+
+def count_new_movies(old: list[dict], new: list[dict]) -> int:
+    """Counts movies in 'new' that were not in 'old'."""
+    known = {movie_key(m) for m in old}   # a set makes the lookup fast
+    return sum(1 for m in new if movie_key(m) not in known)
+
 # ---------- Configuration (remember the last CSV) ----------
 def read_last_path() -> str | None:
     data = read_config()
@@ -400,6 +409,10 @@ class App(tk.Tk):
         # Red message for invalid year fields (empty when everything is fine)
         self.year_error = ttk.Label(filters, text="", foreground="red")
         self.year_error.pack(side="left")
+        
+        # Green note about new movies after an import (under the counter)
+        self.new_label = ttk.Label(filters, text="", foreground=GREEN)
+        self.new_label.pack(side="right")
 
         # ---------- Table ----------
         middle = ttk.Frame(self, padding=(self.px(12), 0))
@@ -645,6 +658,7 @@ class App(tk.Tk):
             messagebox.showerror("Import Error", str(error))
             return
 
+        previous = self.movies
         save_last_path(path)
         self.set_movies(movies)
 
@@ -655,6 +669,13 @@ class App(tk.Tk):
                 f"{len(movies)} movies imported.\n"
                 f"- {ignored} lines ignored (missing name or malformed)\n"
                 f"- {incomplete} movies with missing data (shown with {EMPTY})")
+            
+        if previous:
+            new_count = count_new_movies(previous, movies)
+            if new_count:
+                word = "movie" if new_count == 1 else "movies"
+                self.new_label.config(
+                    text=f"{new_count} new {word} since last time")
         
     def update_decades(self) -> None:
         """Refreshes the decade dropdown with the decades that exist in the list."""
@@ -674,6 +695,8 @@ class App(tk.Tk):
         self.result.config(text="")
         self.update_decades()
         self.clear_filters()
+        self.result.config(text="")
+        self.new_label.config(text="")
         
     def check_for_update(self) -> None:
         """Starts the check in the background so the window never freezes."""

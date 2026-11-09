@@ -5,7 +5,8 @@ import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
-                      valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movie)
+                      valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movie,
+                      count_new_movies)
 import build
 
 
@@ -851,3 +852,50 @@ def test_delete_last_movie_of_selected_decade_resets_filter(
 
 def test_delete_key_is_bound(app):
     assert app.table.bind("<Delete>") != ""
+    
+# ---------- count_new_movies ----------
+def test_count_new_movies_same_lists(movies):
+    assert count_new_movies(movies, movies) == 0
+
+
+def test_count_new_movies_one_extra(movies):
+    assert count_new_movies(movies[:3], movies) == 1
+
+
+def test_count_new_movies_empty_old_list(movies):
+    assert count_new_movies([], movies) == 4
+
+
+def test_count_new_movies_ignores_removed(movies):
+    # one removed, one added: only the added one counts
+    assert count_new_movies(movies[:2], [movies[0], movies[2]]) == 1
+
+def test_import_shows_new_movies_note(app, movies, tmp_path, monkeypatch):
+    path = str(tmp_path / "w.csv")
+    save_movies(path, movies)
+    monkeypatch.setattr(boxdlist.filedialog, "askopenfilename",
+                        lambda **kwargs: path)
+    monkeypatch.setattr(boxdlist, "save_last_path", lambda p: None)
+    monkeypatch.setattr(boxdlist.messagebox, "showwarning",
+                        lambda *a, **k: None)   # "No Year" is incomplete
+    app.set_movies(movies[:2])
+    app.import_csv()
+    assert app.new_label.cget("text") == "2 new movies since last time"
+
+
+def test_first_import_shows_no_note(app, movies, tmp_path, monkeypatch):
+    path = str(tmp_path / "w.csv")
+    save_movies(path, movies)
+    monkeypatch.setattr(boxdlist.filedialog, "askopenfilename",
+                        lambda **kwargs: path)
+    monkeypatch.setattr(boxdlist, "save_last_path", lambda p: None)
+    monkeypatch.setattr(boxdlist.messagebox, "showwarning",
+                        lambda *a, **k: None)
+    app.import_csv()   # the app starts empty
+    assert app.new_label.cget("text") == ""
+
+
+def test_set_movies_clears_new_movies_note(app, movies):
+    app.new_label.config(text="2 new movies since last time")
+    app.set_movies(movies)
+    assert app.new_label.cget("text") == ""
