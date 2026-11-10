@@ -14,6 +14,7 @@ import unicodedata
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk, font
+from tkinterdnd2 import DND_FILES, TkinterDnD
 import urllib.request
 import threading
 import tempfile
@@ -40,7 +41,7 @@ VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
-APP_VERSION = "1.0.11"
+APP_VERSION = "1.0.12"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 
 # Letterboxd-inspired palette
@@ -54,7 +55,7 @@ ORANGE = "#FFB000"        # update warning
 BLUE = "#40BCF4"          # detail color
 ROW_ALT = "#262D34"       # alternate table rows and button hover
 SCROLL = "#3A444D"        # scrollbar thumb
-LOGO_GREEN = "#00E054"    # logo only, small area so the bright green is fine
+LOGO_GREEN = "#00E054"    # logo and import message
 LOGO_ORANGE = "#FF8000"   # logo only
 
 
@@ -320,8 +321,8 @@ def rounded_points(x1: float, y1: float, x2: float, y2: float, r: float) -> list
             x1, y2 - r, x1, y2 - r, x1, y1 + r, x1, y1 + r, x1, y1]
 
 # ---------- Interface ----------
-class App(tk.Tk):
-    """Main window. Inherits from tk.Tk, meaning the class itself is the window."""
+class App(TkinterDnD.Tk):
+    """Main window. Inherits from TkinterDnD.Tk, meaning the class itself is the window."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -354,6 +355,10 @@ class App(tk.Tk):
         self.build_logo(header).pack(side="left")
         ttk.Label(header, text="BoxdList", font=("Segoe UI", 11, "bold")).pack(
                   side="left", padx=(self.px(8), 0))
+        self.status = ttk.Label(header, text="",
+                        font=("Segoe UI", 10, "bold"), foreground=LOGO_GREEN)
+        self.status.pack(side="right")
+        self._status_job = None
         tk.Frame(self, height=self.px(1), bg=ROW_ALT, bd=0,
                  highlightthickness=0, padx=self.px(12)).pack(fill="x", pady=(self.px(10), 0))
 
@@ -478,6 +483,8 @@ class App(tk.Tk):
         self.table.bind("<Delete>", lambda _: self.delete_selected())
 
         self.dark_title_bar()   # ask Windows for a dark title bar
+        self.drop_target_register(DND_FILES)
+        self.dnd_bind("<<Drop>>", self.on_drop)
         self.update_list()
         self.load_last_csv()
         if getattr(sys, "frozen", False):
@@ -651,17 +658,20 @@ class App(tk.Tk):
             filetypes=[("CSV", "*.csv"), ("All files", "*.*")])
         if not path:
             return
-
+        self.load_path(path)
+    
+    def load_path(self, path: str) -> None:
+        """Loads a watchlist CSV from a path and refreshes the app."""
         try:
             movies, ignored = load_movies(path)
         except (OSError, ValueError, UnicodeDecodeError, csv.Error) as error:
             messagebox.showerror("Import Error", str(error))
             return
-
+        
         previous = self.movies
         save_last_path(path)
         self.set_movies(movies)
-
+        
         incomplete = sum(is_incomplete(f) for f in movies)
         if ignored or incomplete:
             messagebox.showwarning(
@@ -669,13 +679,33 @@ class App(tk.Tk):
                 f"{len(movies)} movies imported.\n"
                 f"- {ignored} lines ignored (missing name or malformed)\n"
                 f"- {incomplete} movies with missing data (shown with {EMPTY})")
-            
+        else:
+            self.show_status(f"{len(movies)} movies imported")
+                    
         if previous:
             new_count = count_new_movies(previous, movies)
             if new_count:
                 word = "movie" if new_count == 1 else "movies"
                 self.new_label.config(
                     text=f"{new_count} new {word} since last time")
+                
+    def on_drop(self, event) -> None:
+        """Loads the CSV that was dropped on the window."""
+        paths = self.tk.splitlist(event.data)
+        if not paths:
+            return
+        path = paths[0]
+        if not path.lower().endswith(".csv"):
+            messagebox.showinfo("BoxdList", "Only CSV files can be dropped.")
+            return
+        self.load_path(path)       
+        
+    def show_status(self, text: str) -> None:
+        """Shows a short message that clears itself after 4 seconds."""
+        if self._status_job is not None:
+            self.after_cancel(self._status_job)
+        self.status.config(text=text)
+        self._status_job = self.after(4000, lambda: self.status.config(text="")) 
         
     def update_decades(self) -> None:
         """Refreshes the decade dropdown with the decades that exist in the list."""

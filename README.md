@@ -16,6 +16,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Remembers the last CSV you imported
 - Warns you about malformed rows and films with missing data
 - Checks for new versions on startup and offers to update (The update check only runs in the installed version)
+- Drag and drop a CSV file onto the window to import it
 
 ## Getting your watchlist from Letterboxd
 
@@ -31,7 +32,7 @@ There are two ways to get the CSV file:
 1. Go to **Settings → Import & Export** and choose **Export your data**.
 2. Unzip the file you receive. The one you need is `watchlist.csv`.
 
-Then, in BoxdList, click **Import CSV** (or press `Ctrl+O`) and select the file.
+Then, in BoxdList, click **Import CSV** (or press `Ctrl+O`) and select the file, or just drag the CSV onto the window.
 
 ## Download
 
@@ -41,9 +42,10 @@ Grab `BoxdListSetup.exe` from the [Releases](../../releases) page and run it. Af
 
 ## Run from source
 
-Requires Python 3.10 or newer. The app only uses the standard library, so there is nothing to install.
+Requires Python 3.10 or newer. Install the dependencies first:
 
 ```
+pip install -r requirements.txt
 python boxdlist.py
 ```
 

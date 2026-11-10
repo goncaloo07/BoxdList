@@ -1,6 +1,6 @@
 import pytest
 import tkinter as tk
-
+from types import SimpleNamespace
 import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
@@ -899,3 +899,123 @@ def test_set_movies_clears_new_movies_note(app, movies):
     app.new_label.config(text="2 new movies since last time")
     app.set_movies(movies)
     assert app.new_label.cget("text") == ""
+    
+# ---------- drag and drop and import message ----------
+def quiet_import(monkeypatch):
+    # No real config write and no warning popups during imports
+    monkeypatch.setattr(boxdlist, "save_last_path", lambda p: None)
+    monkeypatch.setattr(boxdlist.messagebox, "showwarning",
+                        lambda *a, **k: None)
+
+
+def csv_file(tmp_path, items, name="w.csv"):
+    # as_posix gives forward slashes, like tkdnd sends on Windows
+    path = tmp_path / name
+    save_movies(str(path), items)
+    return path.as_posix()
+
+
+def drop(app, text):
+    # on_drop only reads event.data
+    app.on_drop(SimpleNamespace(data=text))
+
+
+def test_drop_csv_loads_movies(app, movies, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    drop(app, csv_file(tmp_path, movies))
+    assert len(table_names(app)) == 4
+
+
+def test_drop_accepts_uppercase_extension(app, movies, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    drop(app, csv_file(tmp_path, movies, name="W.CSV"))
+    assert len(table_names(app)) == 4
+
+
+def test_drop_path_with_spaces(app, movies, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    path = csv_file(tmp_path, movies, name="my watchlist.csv")
+    # tkdnd wraps paths with spaces in braces
+    drop(app, "{" + path + "}")
+    assert len(table_names(app)) == 4
+
+
+def test_drop_multiple_files_loads_only_the_first(app, movies, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    first = csv_file(tmp_path, movies[:2], name="a.csv")
+    second = csv_file(tmp_path, movies, name="b.csv")
+    drop(app, "{" + first + "} {" + second + "}")
+    assert app.counter.cget("text") == "2 / 2"
+
+
+def test_drop_non_csv_shows_message_and_keeps_list(app, movies, tmp_path, monkeypatch):
+    shown = []
+    monkeypatch.setattr(boxdlist.messagebox, "showinfo",
+                        lambda *args, **kwargs: shown.append(args))
+    app.set_movies(movies)
+    drop(app, (tmp_path / "photo.png").as_posix())
+    assert len(shown) == 1
+    assert shown[0][1] == "Only CSV files can be dropped."
+    assert len(app.movies) == 4
+
+
+def test_drop_empty_data_does_nothing(app, movies, monkeypatch):
+    shown = []
+    monkeypatch.setattr(boxdlist.messagebox, "showinfo",
+                        lambda *args, **kwargs: shown.append(args))
+    app.set_movies(movies)
+    drop(app, "")
+    assert shown == []
+    assert len(app.movies) == 4
+
+
+def test_drop_invalid_csv_shows_error_and_keeps_list(app, movies, tmp_path, monkeypatch):
+    errors = []
+    monkeypatch.setattr(boxdlist.messagebox, "showerror",
+                        lambda *args, **kwargs: errors.append(args))
+    bad = tmp_path / "bad.csv"
+    bad.write_text("Foo,Bar\n1,2\n", encoding="utf-8")   # wrong columns
+    app.set_movies(movies)
+    drop(app, bad.as_posix())
+    assert len(errors) == 1
+    assert len(app.movies) == 4
+
+
+def test_load_path_shows_status_message(app, movies, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(boxdlist.messagebox, "showwarning",
+                        lambda *args, **kwargs: warnings.append(args))
+    app.status.config(text="")
+    # first 3 movies are complete, so there is no warning
+    app.load_path(csv_file(tmp_path, movies[:3]))
+    assert app.status.cget("text") == "3 movies imported"
+    assert warnings == []
+
+
+def test_load_path_with_warning_has_no_status_message(app, movies, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    app.status.config(text="")
+    # "No Year" is incomplete, so the warning popup is used instead
+    app.load_path(csv_file(tmp_path, movies))
+    assert app.status.cget("text") == ""
+
+
+def test_new_movies_note_without_warning(app, movies, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    app.set_movies(movies[:2])
+    app.load_path(csv_file(tmp_path, movies[:3]))   # all complete
+    assert app.new_label.cget("text") == "1 new movie since last time"
+
+
+def test_show_status_clears_itself(app, monkeypatch):
+    scheduled = []
+    # Capture the timer instead of waiting 4 seconds
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func: scheduled.append((ms, func)) or "job")
+    app._status_job = None
+    app.show_status("hello")
+    assert app.status.cget("text") == "hello"
+    assert scheduled[0][0] == 4000
+    scheduled[0][1]()   # run the clear function
+    assert app.status.cget("text") == ""

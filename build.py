@@ -44,6 +44,7 @@ def main() -> None:
         "--name", "BoxdList",
         "--icon", "assets/boxdlist.ico",
         "--add-data", "assets/boxdlist.ico;assets",
+        "--collect-all", "tkinterdnd2",
         "--noconfirm", "--clean", "boxdlist.py",
     ]
     run_step("Building the app", pyinstaller_command)
