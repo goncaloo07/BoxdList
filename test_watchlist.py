@@ -499,6 +499,9 @@ SCREEN = (0, 0, 1920, 1080)
     ("900x650+1950+60", SCREEN, "900x650"),                  # monitor is gone: dropped
     ("900x650+-32000+-32000", SCREEN, "900x650"),            # minimized on Windows: dropped
     ("900x650+-1920+0", (-1920, 0, 1920, 1080), "900x650+-1920+0"),  # monitor on the left: kept
+    ("900x650+1850+60", SCREEN, "900x650"),   # only 70 px visible: dropped
+    ("900x650+120+1050", SCREEN, "900x650"),  # only 30 px visible at the bottom: dropped
+    ("900x650+120+-30", SCREEN, "900x650"),   # title bar above the screen: dropped
 ])
 def test_fit_on_screen(size, screen, expected):
     assert fit_on_screen(size, screen) == expected
