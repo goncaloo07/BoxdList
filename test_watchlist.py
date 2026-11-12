@@ -6,7 +6,7 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movie,
-                      count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent)
+                      count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie)
 import build
 from datetime import date, timedelta
 
