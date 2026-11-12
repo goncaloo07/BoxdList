@@ -20,6 +20,7 @@ import threading
 import tempfile
 import subprocess
 import ctypes
+from datetime import date, timedelta
   
 def app_folder() -> Path:
     """Folder of the .exe when frozen, or of this file when running the code."""
@@ -44,6 +45,8 @@ VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
 APP_VERSION = "1.0.12"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
+RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
+                  "Last 30 days": 30, "Last year": 365}
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -167,6 +170,21 @@ def filter_movies(movies: list[dict], term: str,
         result.append(f)
     return result
 
+def filter_recent(movies: list[dict], days: int | None,
+                  today: date) -> list[dict]:
+    """Keeps only the movies added in the last 'days' days (None = no filter)."""
+    if days is None:
+        return list(movies)
+    limit = today - timedelta(days=days)   # oldest date that still counts
+    result = []
+    for m in movies:
+        try:
+            added = date.fromisoformat(m["date"])
+        except ValueError:
+            continue   # empty or impossible date, like 2024-13-45
+        if added >= limit:
+            result.append(m)
+    return result
 
 def sort_movies(movies: list[dict], column: str | None,
                 reverse: bool) -> list[dict]:
@@ -440,6 +458,14 @@ class App(TkinterDnD.Tk):
         self.decade.set(NO_FILTER)
         self.decade.pack(side="left")
         self.decade.bind("<<ComboboxSelected>>", lambda _: self.select_decade())
+        
+        ttk.Label(filters, text="Added", foreground=MUTED).pack(
+            side="left", padx=(self.px(10), self.px(6)))
+        self.recent = ttk.Combobox(filters, state="readonly", width=12,
+                                values=list(RECENT_OPTIONS))   # the dict keys are the texts
+        self.recent.set(NO_FILTER)
+        self.recent.pack(side="left")
+        self.recent.bind("<<ComboboxSelected>>", lambda _: self.update_list())
 
         ttk.Button(filters, text="Clear filters",
                    command=self.clear_filters).pack(side="left", padx=self.px(10))
@@ -849,6 +875,7 @@ class App(TkinterDnD.Tk):
         self.year_min.set("")
         self.year_max.set("")
         self.decade.set(NO_FILTER)
+        self.recent.set(NO_FILTER)
         self.update_list()
 
     # ----- Table Updates -----
@@ -871,6 +898,8 @@ class App(TkinterDnD.Tk):
         filtered = filter_movies(self.movies, self.search.get(),
                                  year_as_int(self.year_min.get()),
                                  year_as_int(self.year_max.get()))
+        days = RECENT_OPTIONS[self.recent.get()]
+        filtered = filter_recent(filtered, days, date.today())
         self.visible = sort_movies(
             filtered, self.sort_column, self.reverse_order)
         if not any(m is self.last_randomized for m in self.visible):

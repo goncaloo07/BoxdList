@@ -6,8 +6,9 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movie,
-                      count_new_movies, count_movies_by_decade, fit_on_screen)
+                      count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent)
 import build
+from datetime import date, timedelta
 
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
@@ -1061,3 +1062,123 @@ def test_update_decades_updates_count_of_selected_decade(app, movies):
     app.update_decades()
     assert app.decade.get() == "2000s (1)"
     assert app.year_min.get() == "2000"
+    
+# ---------- filter by dates ----------
+TODAY = date(2024, 4, 1)
+
+
+def test_filter_recent_without_days_returns_everything(movies):
+    assert filter_recent(movies, None, TODAY) == movies
+
+
+def test_filter_recent_30_days(movies):
+    # limit is 2024-03-02, so Amélie (03-01) is just outside
+    assert names(filter_recent(movies, 30, TODAY)) == ["No Year"]
+
+
+def test_filter_recent_60_days(movies):
+    # limit is 2024-02-01 (2024 is a leap year), only Blade Runner is older
+    assert names(filter_recent(movies, 60, TODAY)) == [
+        "Amélie", "Cidade de Deus", "No Year"]
+
+
+def test_filter_recent_includes_the_limit_day():
+    items = [movie("Edge", date="2024-03-02")]   # exactly 30 days ago
+    assert filter_recent(items, 30, TODAY) == items
+
+
+def test_filter_recent_ignores_missing_or_invalid_dates():
+    items = [movie("Empty", date=""), movie("Broken", date="2024-13-45")]
+    assert filter_recent(items, 365, TODAY) == []
+
+
+def test_filter_recent_does_not_change_original_list(movies):
+    original = list(movies)
+    filter_recent(movies, 30, TODAY)
+    assert movies == original
+
+# ---------- recent filter in the interface ----------
+def days_ago(n):
+    # a date n days before today, as the CSV writes it
+    return (date.today() - timedelta(days=n)).isoformat()
+
+
+def recent_movies():
+    # far from the 7, 30 and 365 day limits, so the tests never depend on the hour
+    return [movie("New", date=days_ago(2)),
+            movie("Month", date=days_ago(20)),
+            movie("Old", date=days_ago(400))]
+
+
+def test_recent_dropdown_lists_options(app):
+    assert list(app.recent.cget("values")) == [
+        "All", "Last 7 days", "Last 30 days", "Last year"]
+
+
+def test_recent_filter_last_7_days(app):
+    app.set_movies(recent_movies())
+    app.recent.set("Last 7 days")
+    app.update_list()
+    assert table_names(app) == ["New"]
+
+
+def test_recent_filter_last_30_days(app):
+    app.set_movies(recent_movies())
+    app.recent.set("Last 30 days")
+    app.update_list()
+    assert table_names(app) == ["New", "Month"]
+
+
+def test_recent_filter_last_year(app):
+    app.set_movies(recent_movies())
+    app.recent.set("Last year")
+    app.update_list()
+    assert table_names(app) == ["New", "Month"]
+
+
+def test_recent_filter_updates_counter(app):
+    app.set_movies(recent_movies())
+    app.recent.set("Last 7 days")
+    app.update_list()
+    assert app.counter.cget("text") == "1 / 3"
+
+
+def test_recent_filter_combines_with_search(app):
+    app.set_movies(recent_movies())
+    app.recent.set("Last 30 days")
+    app.search.set("mon")   # only "Month" has "mon" in the name
+    app.update_list()
+    assert table_names(app) == ["Month"]
+
+
+def test_recent_filter_hides_movies_without_date(app):
+    app.set_movies([movie("No Date", date=""), *recent_movies()])
+    app.recent.set("Last year")
+    app.update_list()
+    assert "No Date" not in table_names(app)
+
+
+def test_recent_all_keeps_movies_without_date(app):
+    app.set_movies([movie("No Date", date=""), *recent_movies()])
+    assert "No Date" in table_names(app)
+
+
+def test_clear_filters_resets_recent(app):
+    app.set_movies(recent_movies())
+    app.recent.set("Last 7 days")
+    app.update_list()
+    app.clear_filters()
+    assert app.recent.get() == "All"
+    assert len(table_names(app)) == 3
+
+
+def test_set_movies_resets_recent(app):
+    # importing a new CSV starts without the old filter
+    app.set_movies(recent_movies())
+    app.recent.set("Last 7 days")
+    app.set_movies(recent_movies())
+    assert app.recent.get() == "All"
+
+
+def test_recent_dropdown_is_bound(app):
+    assert app.recent.bind("<<ComboboxSelected>>") != ""
