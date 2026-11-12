@@ -263,6 +263,12 @@ def remove_movie(movies: list[dict], target: dict) -> list[dict]:
     # 'is' compares the exact object, so duplicates are safe
     return [m for m in movies if m is not target]
 
+def insert_movie(movies: list[dict], movie: dict, index: int) -> list[dict]:
+    """Returns a new list with 'movie' put back at 'index'."""
+    result = list(movies)
+    result.insert(index, movie)   # an index past the end just appends
+    return result
+
 def movie_key(movie: dict) -> tuple[str, str]:
     """What identifies a movie: name + year."""
     return (movie["name"], movie["year"])
@@ -398,6 +404,7 @@ class App(TkinterDnD.Tk):
         self.update_url: str | None = None
         self._search_job = None          # pending after() ID (debounce)
         self.downloading = False   # True while the installer is being downloaded
+        self.last_deleted: tuple[dict, int] | None = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # ---------- Header: logo and app name ----------
@@ -537,6 +544,8 @@ class App(TkinterDnD.Tk):
         self.bind("<Control-F>", lambda _: self.focus_on_search())
         self.bind("<Control-r>", lambda _: self.random_movie())
         self.bind("<Control-R>", lambda _: self.random_movie())
+        self.bind("<Control-z>", lambda _: self.undo_delete())
+        self.bind("<Control-Z>", lambda _: self.undo_delete())
         self.table.bind("<Return>", lambda _: self.open_link())
         self.table.bind("<Button-3>", self.on_right_click)
         self.table.bind("<Delete>", lambda _: self.delete_selected())
@@ -790,6 +799,7 @@ class App(TkinterDnD.Tk):
         self.update_decades()
         self.clear_filters()
         self.new_label.config(text="")
+        self.last_deleted = None
         
     def check_for_update(self) -> None:
         """Starts the check in the background so the window never freezes."""
@@ -1018,6 +1028,18 @@ class App(TkinterDnD.Tk):
         self.clipboard_clear()          # empties the clipboard
         self.clipboard_append(name)   # puts the text in it
         
+    def save_to_last_csv(self, movies: list[dict], error_title: str) -> bool:
+        """Saves to the last imported CSV. Returns False if saving failed."""
+        path = read_last_path()
+        if not path:
+            return True   # no CSV yet: nothing to save
+        try:
+            save_movies(path, movies)
+        except OSError as error:
+            messagebox.showerror(error_title, str(error))
+            return False
+        return True
+
     def delete_selected(self) -> None:
         """Removes the selected movie from the list and from the CSV."""
         sel = self.table.selection()
@@ -1029,18 +1051,31 @@ class App(TkinterDnD.Tk):
             f"Are you sure you want to delete '{target['name']}' from the list?")
         if not answer:
             return
+        # position in the full list (not the filtered one), so undo can put it back
+        index = next(i for i, m in enumerate(self.movies) if m is target)
         remaining = remove_movie(self.movies, target)
         # save first: if it fails, the list stays as it was
-        path = read_last_path()
-        if path:
-            try:
-                save_movies(path, remaining)
-            except OSError as error:
-                messagebox.showerror("Delete Error", str(error))
-                return
+        if not self.save_to_last_csv(remaining, "Delete Error"):
+            return
         self.movies = remaining
+        self.last_deleted = (target, index)
         self.update_decades()
         self.update_list()
+        self.show_status(f"Deleted '{target['name']}' (Ctrl+Z to undo)")
+
+    def undo_delete(self) -> None:
+        """Puts the last deleted movie back, in the list and in the CSV."""
+        if self.last_deleted is None:
+            return
+        movie, index = self.last_deleted
+        restored = insert_movie(self.movies, movie, index)
+        if not self.save_to_last_csv(restored, "Undo Error"):
+            return   # keep last_deleted, so the user can try again
+        self.movies = restored
+        self.last_deleted = None
+        self.update_decades()
+        self.update_list()
+        self.show_status(f"Restored '{movie['name']}'")
         
     def export_csv(self) -> None:
         """Saves the movies currently shown to a CSV file."""

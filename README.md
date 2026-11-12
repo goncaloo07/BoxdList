@@ -21,6 +21,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Warns you about malformed rows and films with missing data
 - Checks for new versions on startup and offers to update (The update check only runs in the installed version)
 - Drag and drop a CSV file onto the window to import it
+- Undo the last delete with `Ctrl+Z` (the film goes back to the same place in your CSV)
 
 ### Keyboard shortcuts
 
@@ -31,6 +32,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 | `Ctrl+R` | Pick a random film |
 | `Enter` | Open the selected film on Letterboxd |
 | `Delete` | Delete the selected film |
+| `Ctrl+Z` | Undo the last delete |
 
 ## Getting your watchlist from Letterboxd
 

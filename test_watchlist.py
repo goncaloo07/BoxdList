@@ -1182,3 +1182,116 @@ def test_set_movies_resets_recent(app):
 
 def test_recent_dropdown_is_bound(app):
     assert app.recent.bind("<<ComboboxSelected>>") != ""
+    
+# ---------- insert_movie ----------
+def test_insert_movie_puts_it_at_the_position(movies):
+    extra = movie("Extra")
+    result = insert_movie(movies, extra, 1)
+    assert names(result) == ["Amélie", "Extra", "Blade Runner",
+                             "Cidade de Deus", "No Year"]
+
+
+def test_insert_movie_past_the_end_appends(movies):
+    extra = movie("Extra")
+    assert insert_movie(movies, extra, 99)[-1] is extra
+
+
+def test_insert_movie_does_not_change_original_list(movies):
+    original = list(movies)
+    insert_movie(movies, movie("Extra"), 0)
+    assert movies == original
+
+
+# ---------- undo delete in the interface ----------
+def test_undo_delete_restores_list_and_csv(app, movies, tmp_path, monkeypatch):
+    path = str(tmp_path / "w.csv")
+    save_movies(path, movies)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: path)
+    confirm_delete(monkeypatch)
+    app.set_movies(movies)
+    app.table.selection_set("1")   # Blade Runner
+    app.delete_selected()
+    assert "Blade Runner" not in names(app.movies)
+    app.undo_delete()
+    # same movies, in the same order as before
+    assert names(app.movies) == names(movies)
+    assert names(load_movies(path)[0]) == names(movies)
+    assert app.status.cget("text") == "Restored 'Blade Runner'"
+
+
+def test_undo_delete_with_filter_keeps_original_position(
+        app, movies, monkeypatch):
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    app.search.set("cidade")
+    app.update_list()
+    app.table.selection_set("0")   # the only visible movie
+    app.delete_selected()
+    app.undo_delete()
+    assert names(app.movies) == names(movies)
+
+
+def test_delete_shows_undo_hint(app, movies, monkeypatch):
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    app.table.selection_set("0")
+    app.delete_selected()
+    assert app.status.cget("text") == "Deleted 'Amélie' (Ctrl+Z to undo)"
+
+
+def test_undo_without_delete_does_nothing(app, movies):
+    app.set_movies(movies)
+    app.undo_delete()
+    assert len(app.movies) == 4
+
+
+def test_undo_only_works_once(app, movies, monkeypatch):
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    app.table.selection_set("0")
+    app.delete_selected()
+    app.undo_delete()
+    app.undo_delete()   # nothing left to undo, must not add it twice
+    assert len(app.movies) == 4
+
+
+def test_undo_save_error_keeps_the_undo_available(app, movies, monkeypatch):
+    errors = []
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    app.table.selection_set("0")
+    app.delete_selected()
+    # now make the CSV fail, only for the undo
+    def fail(path, items):
+        raise OSError("disk full")
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: "/tmp/w.csv")
+    monkeypatch.setattr(boxdlist, "save_movies", fail)
+    monkeypatch.setattr(boxdlist.messagebox, "showerror",
+                        lambda *args, **kwargs: errors.append(args))
+    app.undo_delete()
+    assert len(errors) == 1
+    assert len(app.movies) == 3          # the movie was not restored
+    assert app.last_deleted is not None  # and the user can try again
+
+
+def test_set_movies_clears_undo(app, movies, monkeypatch):
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    app.table.selection_set("0")
+    app.delete_selected()
+    app.set_movies(movies)   # like importing a new CSV
+    assert app.last_deleted is None
+
+
+def test_ctrl_z_shortcuts_undo_delete(app, monkeypatch):
+    called = []
+    monkeypatch.setattr(app, "undo_delete", lambda: called.append(1))
+    press(app, "<Control-z>")
+    assert len(called) == 1
+    press(app, "<Control-Z>")
+    assert len(called) == 2
