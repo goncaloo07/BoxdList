@@ -6,7 +6,7 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movie,
-                      count_new_movies, count_movies_by_decade)
+                      count_new_movies, count_movies_by_decade, fit_on_screen)
 import build
 
 
@@ -483,9 +483,25 @@ def test_copy_name_puts_movie_in_clipboard(app, movies):
     ("banana", "760x600"),     # bad text falls back
     (12345, "760x600"),        # not even text
     (None, "760x600"),         # key missing in the file
+    ("900x650+120+80", "900x650+120+80"),     # size and position are kept
+    ("900x650+-1920+0", "900x650+-1920+0"),   # negative position (second monitor)
+    ("900x650+120", "760x600"), # half a position falls back
 ])
 def test_valid_window_size(value, expected):
     assert valid_window_size(value) == expected
+    
+SCREEN = (0, 0, 1920, 1080)
+
+@pytest.mark.parametrize("size, screen, expected", [
+    ("900x650", SCREEN, "900x650"),                          # no position: unchanged
+    ("900x650+120+80", SCREEN, "900x650+120+80"),            # inside: kept
+    ("900x650+1500+60", SCREEN, "900x650+1500+60"),          # half outside: still kept
+    ("900x650+1950+60", SCREEN, "900x650"),                  # monitor is gone: dropped
+    ("900x650+-32000+-32000", SCREEN, "900x650"),            # minimized on Windows: dropped
+    ("900x650+-1920+0", (-1920, 0, 1920, 1080), "900x650+-1920+0"),  # monitor on the left: kept
+])
+def test_fit_on_screen(size, screen, expected):
+    assert fit_on_screen(size, screen) == expected
     
 @pytest.mark.parametrize("value, expected", [
     ("name", "name"),    # good value is kept

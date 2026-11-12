@@ -40,7 +40,8 @@ EMPTY = "—"            # shown in the table when data is missing
 VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
-VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}")
+VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
+MIN_VISIBLE = 200
 APP_VERSION = "1.0.12"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 
@@ -288,6 +289,23 @@ def valid_window_size(value) -> str:
         return value
     return DEFAULT_SIZE
 
+def fit_on_screen(size: str, screen: tuple[int, int, int, int]) -> str:
+    """Drops the saved position if the window would be off the screen.
+    'screen' is (left, top, right, bottom). 'size' looks like 900x650+120+80.
+    """
+    match = re.fullmatch(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", size)
+    if not match:
+        return size   # no position saved, nothing to check
+    width, height, x, y = (int(n) for n in match.groups())
+    left, top, right, bottom = screen
+    # how many pixels of the window are inside the screen
+    visible_w = min(x + width, right) - max(x, left)
+    visible_h = min(y + height, bottom) - max(y, top)
+    # y >= top keeps the title bar reachable, or you could not drag the window back
+    if visible_w >= MIN_VISIBLE and visible_h >= MIN_VISIBLE and y >= top:
+        return size
+    return f"{width}x{height}"
+
 def valid_sort_column(value) -> str | None:
     """Returns the saved column if it exists, else None."""
     if not isinstance(value, str):
@@ -339,6 +357,11 @@ class App(TkinterDnD.Tk):
         self.title(f"BoxdList v{APP_VERSION}")
         config = read_config()
         size = valid_window_size(config.get("window_size"))
+        # the whole desktop area: left, top, right, bottom (can be negative with 2 monitors)
+        screen = (self.winfo_vrootx(), self.winfo_vrooty(),
+                self.winfo_vrootx() + self.winfo_vrootwidth(),
+                self.winfo_vrooty() + self.winfo_vrootheight())
+        size = fit_on_screen(size, screen)
         if size == DEFAULT_SIZE:
             # only the default needs scaling; a saved size is already in real pixels
             w, h = size.split("x")
@@ -1013,7 +1036,8 @@ class App(TkinterDnD.Tk):
         data = read_config()
         data["sort_column"] = self.sort_column
         data["reverse_order"] = self.reverse_order
-        data["window_size"] = f"{self.winfo_width()}x{self.winfo_height()}"
+        data["window_size"] = (f"{self.winfo_width()}x{self.winfo_height()}"
+                               f"+{self.winfo_x()}+{self.winfo_y()}")
         write_config(data)
         self.destroy()
 
