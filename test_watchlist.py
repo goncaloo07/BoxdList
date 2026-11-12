@@ -6,7 +6,7 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movie,
-                      count_new_movies)
+                      count_new_movies, count_movies_by_decade)
 import build
 
 
@@ -412,7 +412,7 @@ def test_sort_other_column_resets_direction(app, movies):
     
 def test_decade_dropdown_lists_decades(app, movies):
     app.set_movies(movies)
-    assert list(app.decade.cget("values")) == ["All", "1980s", "2000s"]
+    assert list(app.decade.cget("values")) == ["All", "1980s (1)", "2000s (2)"]
     
 def test_decade_filters_table(app, movies):
     app.set_movies(movies)
@@ -828,10 +828,10 @@ def test_delete_updates_decade_dropdown(app, movies, monkeypatch):
     confirm_delete(monkeypatch)
     monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
     app.set_movies(movies)
-    assert "1980s" in app.decade.cget("values")
+    assert "1980s (1)" in app.decade.cget("values")
     app.table.selection_set("1")   # Blade Runner, the only 1980s movie
     app.delete_selected()
-    assert list(app.decade.cget("values")) == ["All", "2000s"]
+    assert list(app.decade.cget("values")) == ["All", "2000s (2)"]
 
 
 def test_delete_last_movie_of_selected_decade_resets_filter(
@@ -1019,3 +1019,26 @@ def test_show_status_clears_itself(app, monkeypatch):
     assert scheduled[0][0] == 4000
     scheduled[0][1]()   # run the clear function
     assert app.status.cget("text") == ""
+
+# ---------- count decades ----------
+def test_count_movies_by_decade(movies):
+    # "No Year" is ignored, 2001 and 2002 share the 2000s
+    assert count_movies_by_decade(movies) == {1980: 1, 2000: 2}
+    
+def test_update_decades_keeps_selected_decade(app, movies):
+    app.set_movies(movies)
+    app.decade.set("2000s (2)")
+    app.select_decade()
+    app.movies = remove_movie(app.movies, movies[1])
+    app.update_decades()
+    assert app.decade.get() == "2000s (2)"
+    assert app.year_min.get() == "2000"
+
+def test_update_decades_updates_count_of_selected_decade(app, movies):
+    app.set_movies(movies)
+    app.decade.set("2000s (2)")
+    app.select_decade()
+    app.movies = remove_movie(app.movies, movies[2])
+    app.update_decades()
+    assert app.decade.get() == "2000s (1)"
+    assert app.year_min.get() == "2000"

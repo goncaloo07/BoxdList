@@ -189,6 +189,16 @@ def pick_random(movies: list[dict], last: dict | None) -> dict:
     candidates = [f for f in movies if f is not last]
     return random.choice(candidates or movies)
 
+def count_movies_by_decade(movies: list[dict]) -> dict:
+    """Counts how many movies there are by decade."""
+    years = [a for a in (year_as_int(f["year"]) for f in movies) if a]
+    counts = {}
+    for year in years:
+        decade = year // 10 * 10
+        # .get gives 0 the first time a decade shows up
+        counts[decade] = counts.get(decade, 0) + 1
+    return counts
+
 def parse_version(tag: str) -> tuple[int, ...]:
     """Turns 'v1.0.10' into (1, 0, 10)."""
     return tuple(int(n) for n in tag.lstrip("v").split("."))
@@ -709,14 +719,19 @@ class App(TkinterDnD.Tk):
         
     def update_decades(self) -> None:
         """Refreshes the decade dropdown with the decades that exist in the list."""
-        years = [a for a in (year_as_int(f["year"]) for f in self.movies) if a]
-        decades = sorted({a // 10 * 10 for a in years})
-        values = [NO_FILTER] + [f"{d}s" for d in decades]
+        # remember the chosen decade as a number, because the text will change
+        current = self.decade.get()
+        start = int(current.split("s")[0]) if current != NO_FILTER else None
+        counts = count_movies_by_decade(self.movies)
+        values = [NO_FILTER] + [f"{d}s ({counts[d]})" for d in sorted(counts)]
         self.decade.config(values=values)
-        # the selected decade may be gone now: go back to "All"
-        if self.decade.get() not in values:
+        if start in counts:
+            # still exists: only the number in the text may have changed
+            self.decade.set(f"{start}s ({counts[start]})")
+        elif start is not None:
+            # that decade is gone: go back to "All" and clear the year fields
             self.decade.set(NO_FILTER)
-            self.select_decade()   # also clears the year fields
+            self.select_decade()
 
     def set_movies(self, movies: list[dict]) -> None:
         """Replaces the current watchlist and refreshes everything."""
@@ -725,7 +740,6 @@ class App(TkinterDnD.Tk):
         self.result.config(text="")
         self.update_decades()
         self.clear_filters()
-        self.result.config(text="")
         self.new_label.config(text="")
         
     def check_for_update(self) -> None:
@@ -753,18 +767,22 @@ class App(TkinterDnD.Tk):
             "Update available",
             f"Version {self.update_version} is available. Update now?")
         if not answer:
-            self.update_label.pack(side="right", padx=8)
+            self.show_update_label("Update pending")
             return
         if not self.update_url:
             messagebox.showerror("Update Error", "Could not find the installer link.")
-            self.update_label.pack(side="right", padx=8)
+            self.show_update_label("Update pending")
             return
         self.downloading = True
-        self.update_label.config(text="Downloading update...")
-        self.update_label.pack(side="right", padx=8)
+        self.show_update_label("Downloading update...")
         target = Path(tempfile.gettempdir()) / "BoxdListSetup.exe"
         threading.Thread(target=self._download_worker,
                         args=(self.update_url, target), daemon=True).start()
+
+    def show_update_label(self, text: str) -> None:
+        """Shows the update label on the right with the given text."""
+        self.update_label.config(text=text)
+        self.update_label.pack(side="right", padx=self.px(8))
         
     def install_update(self, installer: Path) -> None:
         try:
@@ -772,7 +790,7 @@ class App(TkinterDnD.Tk):
             subprocess.Popen([str(installer), "/SILENT", "/CLOSEAPPLICATIONS"])
         except OSError:
             messagebox.showerror("Update", "Could not start the installer.")
-            self.update_label.config(text="Update pending")   # let the user try again
+            self.show_update_label("Update pending")
             return
         self.on_close()
         
@@ -788,8 +806,7 @@ class App(TkinterDnD.Tk):
         else:
             messagebox.showerror("Update", "Download failed.")
             # let the user try again
-            self.update_label.pack(side="right", padx=8)
-            self.update_label.config(text="Update pending")
+            self.show_update_label("Update pending")
 
     # ----- Filters -----
     def select_decade(self) -> None:
@@ -798,9 +815,10 @@ class App(TkinterDnD.Tk):
             self.year_min.set("")
             self.year_max.set("")
         else:
-            start = int(choice[:-1])  # "1990s" -> 1990
+            start = int(choice.split("s")[0])  # "1990s" -> 1990
             self.year_min.set(str(start))
             self.year_max.set(str(start + 9))
+        self.update_list()
 
     def clear_filters(self) -> None:
         # Each set() triggers scheduling; only one update runs at the end
