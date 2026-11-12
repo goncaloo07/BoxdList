@@ -13,10 +13,24 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Filter by year range or by decade
 - Random pick from the films currently shown, never repeating the previous one
 - Double-click a film (or press `Enter`) to open its Letterboxd page
+- Right-click a film to open its page, copy its name or delete it
+- Delete a film with the `Delete` key or the right-click menu (it asks first, and the film is also removed from your CSV file)
+- Export the films currently shown to a new CSV (handy after filtering)
+- Shows how many films are new each time you import an updated CSV
 - Remembers the last CSV you imported
 - Warns you about malformed rows and films with missing data
 - Checks for new versions on startup and offers to update (The update check only runs in the installed version)
 - Drag and drop a CSV file onto the window to import it
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+O` | Import a CSV |
+| `Ctrl+F` | Jump to the search box |
+| `Ctrl+R` | Pick a random film |
+| `Enter` | Open the selected film on Letterboxd |
+| `Delete` | Delete the selected film |
 
 ## Getting your watchlist from Letterboxd
 
@@ -33,6 +47,8 @@ There are two ways to get the CSV file:
 2. Unzip the file you receive. The one you need is `watchlist.csv`.
 
 Then, in BoxdList, click **Import CSV** (or press `Ctrl+O`) and select the file, or just drag the CSV onto the window.
+
+> Deleting a film in BoxdList edits the CSV file you imported. Your Letterboxd watchlist online is not changed.
 
 ## Download
 
