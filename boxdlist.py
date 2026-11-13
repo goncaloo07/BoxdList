@@ -43,7 +43,7 @@ VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_SIZE = "760x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.14"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
                   "Last 30 days": 30, "Last year": 365}
