@@ -47,6 +47,7 @@ APP_VERSION = "1.0.13"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
                   "Last 30 days": 30, "Last year": 365}
+MAX_OPEN_AT_ONCE = 5 # above this, ask before opening many pages
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -258,10 +259,11 @@ def download_file(url: str, target: Path) -> bool:
     except OSError:
         return False
     
-def remove_movie(movies: list[dict], target: dict) -> list[dict]:
-    """Returns a new list without 'target'."""
-    # 'is' compares the exact object, so duplicates are safe
-    return [m for m in movies if m is not target]
+def remove_movies(movies: list[dict], targets: list[dict]) -> list[dict]:
+    """Returns a new list without any of the 'targets'."""
+    # id() is unique per object, so duplicates are safe
+    ids = {id(t) for t in targets}
+    return [m for m in movies if id(m) not in ids]
 
 def insert_movie(movies: list[dict], movie: dict, index: int) -> list[dict]:
     """Returns a new list with 'movie' put back at 'index'."""
@@ -404,7 +406,7 @@ class App(TkinterDnD.Tk):
         self.update_url: str | None = None
         self._search_job = None          # pending after() ID (debounce)
         self.downloading = False   # True while the installer is being downloaded
-        self.last_deleted: tuple[dict, int] | None = None
+        self.last_deleted: list[tuple[dict, int]] | None = None
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # ---------- Header: logo and app name ----------
@@ -544,11 +546,14 @@ class App(TkinterDnD.Tk):
         self.bind("<Control-F>", lambda _: self.focus_on_search())
         self.bind("<Control-r>", lambda _: self.random_movie())
         self.bind("<Control-R>", lambda _: self.random_movie())
-        self.bind("<Control-z>", lambda _: self.undo_delete())
-        self.bind("<Control-Z>", lambda _: self.undo_delete())
+        self.bind("<Control-z>", lambda _: self.on_undo_key())
+        self.bind("<Control-Z>", lambda _: self.on_undo_key())
         self.table.bind("<Return>", lambda _: self.open_link())
         self.table.bind("<Button-3>", self.on_right_click)
         self.table.bind("<Delete>", lambda _: self.delete_selected())
+        self.drag_start: str | None = None   # row where the mouse drag began
+        self.table.bind("<Button-1>", self.on_press, add="+")
+        self.table.bind("<B1-Motion>", self.on_drag, add="+")
 
         self.dark_title_bar()   # ask Windows for a dark title bar
         self.drop_target_register(DND_FILES)
@@ -982,22 +987,56 @@ class App(TkinterDnD.Tk):
         year = f" ({f['year']})" if f["year"] else ""
         self.result.config(text=f["name"] + year)
         self.table.focus_set()
-
-    def open_link(self) -> None:
-        sel = self.table.selection()
-        if not sel:
-            return
-        url = self.visible[int(sel[0])]["url"]
-        if url:
-            webbrowser.open(url)
-        else:
-            messagebox.showinfo("BoxdList", "This movie has no link.")
-
+        
     def on_double_click(self, event) -> None:
         """Opens the link only if a row was double-clicked, not the header."""
         # identify_region returns "heading", "cell" or "nothing"
         if self.table.identify_region(event.x, event.y) == "cell":
             self.open_link()
+
+    def open_link(self) -> None:
+        """Opens the Letterboxd page of every selected movie."""
+        sel = self.table.selection()
+        if not sel:
+            return
+        # selected movies, then only their links (movies without a link are skipped)
+        selected = [self.visible[int(i)] for i in sel]
+        urls = [m["url"] for m in selected if m["url"]]
+        if not urls:
+            text = ("This movie has no link." if len(selected) == 1
+                    else "None of these movies has a link.")
+            messagebox.showinfo("BoxdList", text)
+            return
+        if len(urls) > MAX_OPEN_AT_ONCE:
+            text = (f"Are you sure you want to open {len(urls)} browser pages?")
+            answer = messagebox.askyesno("BoxdList", text)
+            if not answer:
+                return
+        for url in urls:
+            webbrowser.open(url)        
+            
+    def on_press(self, event) -> None:
+        """Remembers the row where a drag starts (plain clicks only)."""
+        # 0x1 is Shift and 0x4 is Ctrl: they keep their normal behavior
+        if event.state & 0x5:
+            self.drag_start = None
+            return
+        # empty text (header or blank area) becomes None
+        self.drag_start = self.table.identify_row(event.y) or None
+
+    def on_drag(self, event) -> None:
+        """Selects every row between the start row and the row under the mouse."""
+        if self.drag_start is None:
+            return
+        current = self.table.identify_row(event.y)
+        rows = self.table.get_children()
+        # the mouse may be outside the rows, or the table may have been rebuilt
+        if not current or self.drag_start not in rows:
+            return
+        first = rows.index(self.drag_start)
+        last = rows.index(current)
+        low, high = min(first, last), max(first, last)
+        self.table.selection_set(rows[low:high + 1])
             
     def on_right_click(self, event) -> None:
         """Shows the menu for the row under the mouse."""
@@ -1041,41 +1080,66 @@ class App(TkinterDnD.Tk):
         return True
 
     def delete_selected(self) -> None:
-        """Removes the selected movie from the list and from the CSV."""
+        """Removes the selected movies from the list and from the CSV."""
         sel = self.table.selection()
         if not sel:
             return
-        target = self.visible[int(sel[0])]
-        answer = messagebox.askyesno(
-            "Delete Movie",
-            f"Are you sure you want to delete '{target['name']}' from the list?")
-        if not answer:
+        # every selected row id becomes a movie
+        targets = [self.visible[int(i)] for i in sel]
+        if len(targets) == 1:
+            question = (f"Are you sure you want to delete "
+                        f"'{targets[0]['name']}' from the list?")
+        else:
+            question = (f"Are you sure you want to delete "
+                        f"{len(targets)} movies from the list?")
+        if not messagebox.askyesno("Delete Movie", question):
             return
-        # position in the full list (not the filtered one), so undo can put it back
-        index = next(i for i, m in enumerate(self.movies) if m is target)
-        remaining = remove_movie(self.movies, target)
+        # position of each movie in the full list (not the filtered one),
+        # walking from the top so the positions come out in increasing order
+        ids = {id(t) for t in targets}
+        deleted = [(m, i) for i, m in enumerate(self.movies) if id(m) in ids]
+        remaining = remove_movies(self.movies, targets)
         # save first: if it fails, the list stays as it was
         if not self.save_to_last_csv(remaining, "Delete Error"):
             return
         self.movies = remaining
-        self.last_deleted = (target, index)
+        self.last_deleted = deleted
         self.update_decades()
         self.update_list()
-        self.show_status(f"Deleted '{target['name']}' (Ctrl+Z to undo)")
+        if len(deleted) == 1:
+            self.show_status(f"Deleted '{deleted[0][0]['name']}' (Ctrl+Z to undo)")
+        else:
+            self.show_status(f"Deleted {len(deleted)} movies (Ctrl+Z to undo)")
+        
+    def on_undo_key(self) -> None:
+        """Ctrl+Z: undo a delete, unless the user is typing in a text box."""
+        try:
+            focused = self.focus_get()
+        except KeyError:
+            return   # Tk can fail here while a dropdown list is open
+        if isinstance(focused, ttk.Entry):   # also covers the Combobox
+            return
+        self.undo_delete()
 
     def undo_delete(self) -> None:
-        """Puts the last deleted movie back, in the list and in the CSV."""
+        """Puts the last deleted movies back, in the list and in the CSV."""
         if self.last_deleted is None:
             return
-        movie, index = self.last_deleted
-        restored = insert_movie(self.movies, movie, index)
+        restored = self.movies
+        for movie, index in self.last_deleted:
+            restored = insert_movie(restored, movie, index)
         if not self.save_to_last_csv(restored, "Undo Error"):
             return   # keep last_deleted, so the user can try again
+        count = len(self.last_deleted)
+        first_name = self.last_deleted[0][0]["name"]
         self.movies = restored
         self.last_deleted = None
         self.update_decades()
         self.update_list()
-        self.show_status(f"Restored '{movie['name']}'")
+        if count == 1:
+            self.show_status(f"Restored '{first_name}'")
+        else:
+            self.show_status(f"Restored {count} movies")
         
     def export_csv(self) -> None:
         """Saves the movies currently shown to a CSV file."""

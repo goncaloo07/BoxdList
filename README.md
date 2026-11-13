@@ -10,7 +10,9 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 
 - Sortable table with title, year and the date you added each film
 - Search by title (ignores case and accents: `amelie` finds *Amélie*)
-- Filter by year range or by decade
+- Filter by year range or by decade (the dropdown shows how many films each decade has)
+- Filter by when you added the film (last 7 days, last 30 days or last year)
+- Remembers the window size, its position and the sort order
 - Random pick from the films currently shown, never repeating the previous one
 - Double-click a film (or press `Enter`) to open its Letterboxd page
 - Right-click a film to open its page, copy its name or delete it

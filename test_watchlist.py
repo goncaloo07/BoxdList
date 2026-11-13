@@ -5,7 +5,7 @@ import boxdlist
 from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
-                      valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movie,
+                      valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movies,
                       count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie)
 import build
 from datetime import date, timedelta
@@ -14,7 +14,6 @@ from datetime import date, timedelta
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
     # Small helper to build a movie dict with sensible defaults
     return {"name": name, "year": year, "date": date, "url": url}
-
 
 @pytest.fixture
 def movies():
@@ -25,13 +24,11 @@ def movies():
         movie("No Year", "", "2024-04-01"),
     ]
 
-
 def write_csv(path, lines, header="Date,Name,Year,Letterboxd URI"):
     # Writes a small CSV file and returns its path as a string
     path.write_text(header + "\n" + "\n".join(lines) + "\n",
                     encoding="utf-8")
     return str(path)
-
 
 def names(items):
     return [m["name"] for m in items]
@@ -50,16 +47,13 @@ def press(app, sequence):
     app.event_generate(sequence)
     app.update()
 
-
 # ---------- normalize ----------
 def test_normalize_removes_accents_and_case():
     assert normalize("Amélie") == "amelie"
     assert normalize("AÇÃO") == "acao"
 
-
 def test_normalize_empty_text():
     assert normalize("") == ""
-
 
 # ---------- year_as_int ----------
 @pytest.mark.parametrize("value, expected", [
@@ -91,10 +85,8 @@ def test_year_range_error_valid(low, high):
 def test_year_range_error_needs_four_digits(low, high):
     assert year_range_error(low, high) == "Years must have 4 digits"
 
-
 def test_year_range_error_inverted_range():
     assert year_range_error("2000", "1990") == "'From' is after 'to'"
-
 
 # ---------- load_movies ----------
 def test_load_movies_reads_columns(tmp_path):
@@ -111,14 +103,12 @@ def test_load_movies_reads_columns(tmp_path):
          "url": "https://boxd.it/b"},
     ]
 
-
 def test_load_movies_accepts_bom(tmp_path):
     path = tmp_path / "w.csv"
     path.write_text(
         "Date,Name,Year,Letterboxd URI\n2024-01-01,X,2000,u\n",
         encoding="utf-8-sig")
     assert load_movies(str(path))[0][0]["name"] == "X"
-
 
 def test_load_movies_short_row_does_not_crash(tmp_path):
     path = write_csv(tmp_path / "w.csv", ["2024-01-01,Only Name"])
@@ -128,12 +118,10 @@ def test_load_movies_short_row_does_not_crash(tmp_path):
     assert result[0]["year"] == ""
     assert result[0]["url"] == ""
 
-
 def test_load_movies_missing_columns(tmp_path):
     path = write_csv(tmp_path / "w.csv", ["a,b"], header="Foo,Bar")
     with pytest.raises(ValueError):
         load_movies(path)
-
 
 def test_load_movies_empty_file(tmp_path):
     path = tmp_path / "empty.csv"
@@ -141,11 +129,9 @@ def test_load_movies_empty_file(tmp_path):
     with pytest.raises(ValueError):
         load_movies(str(path))
 
-
 def test_load_movies_missing_file(tmp_path):
     with pytest.raises(OSError):
         load_movies(str(tmp_path / "does_not_exist.csv"))
-
 
 def test_load_movies_ignores_row_without_name(tmp_path):
     path = write_csv(tmp_path / "w.csv", [
@@ -183,13 +169,11 @@ def test_load_movies_invalid_fields_become_empty(tmp_path):
     result, _ = load_movies(path)
     assert result == [{"name": "Movie", "year": "", "date": "", "url": ""}]
 
-
 def test_is_incomplete():
     assert not is_incomplete(movie("A"))
     assert is_incomplete(movie("A", year=""))
     assert is_incomplete(movie("A", date=""))
     assert is_incomplete(movie("A", url=""))
-
 
 # ---------- filter_movies ----------
 def test_filter_without_criteria_returns_everything(movies):
@@ -200,7 +184,6 @@ def test_filter_by_name_ignores_accents_and_case(movies):
     result = filter_movies(movies, "AMELIE", None, None)
     assert names(result) == ["Amélie"]
 
-
 def test_filter_by_name_ignores_outer_spaces(movies):
     assert len(filter_movies(movies, "  blade  ", None, None)) == 1
 
@@ -209,33 +192,26 @@ def test_filter_by_year_range(movies):
     result = filter_movies(movies, "", 2000, 2002)
     assert names(result) == ["Amélie", "Cidade de Deus"]
 
-
 def test_filter_min_year_only(movies):
     result = filter_movies(movies, "", 2002, None)
     assert names(result) == ["Cidade de Deus"]
-
 
 def test_filter_max_year_only(movies):
     result = filter_movies(movies, "", None, 1990)
     assert names(result) == ["Blade Runner"]
 
-
 def test_filter_with_range_excludes_movies_without_year(movies):
     result = filter_movies(movies, "", 1900, 2100)
     assert "No Year" not in names(result)
 
-
 def test_filter_without_range_keeps_movies_without_year(movies):
     assert "No Year" in names(filter_movies(movies, "", None, None))
-
 
 def test_filter_combines_name_and_year(movies):
     assert filter_movies(movies, "c", 2002, 2002) == [movies[2]]
 
-
 def test_filter_no_results(movies):
     assert filter_movies(movies, "zzz", None, None) == []
-
 
 # ---------- sort_movies ----------
 def test_sort_without_column_returns_copy_in_same_order(movies):
@@ -243,37 +219,30 @@ def test_sort_without_column_returns_copy_in_same_order(movies):
     assert result == movies
     assert result is not movies
 
-
 def test_sort_does_not_change_original_list(movies):
     original = list(movies)
     sort_movies(movies, "year", True)
     assert movies == original
 
-
 def test_sort_by_name(movies):
     assert names(sort_movies(movies, "name", False)) == [
         "Amélie", "Blade Runner", "Cidade de Deus", "No Year"]
 
-
 def test_sort_by_name_reversed(movies):
     assert names(sort_movies(movies, "name", True))[0] == "No Year"
-
 
 def test_sort_by_year_is_numeric_with_empty_first(movies):
     assert names(sort_movies(movies, "year", False)) == [
         "No Year", "Blade Runner", "Amélie", "Cidade de Deus"]
-
 
 def test_sort_year_is_not_alphabetical():
     # As text "1000" < "999", but as numbers 999 < 1000
     items = [movie("A", "999"), movie("B", "1000")]
     assert names(sort_movies(items, "year", False)) == ["A", "B"]
 
-
 def test_sort_by_date(movies):
     assert names(sort_movies(movies, "date", False)) == [
         "Blade Runner", "Cidade de Deus", "Amélie", "No Year"]
-
 
 # ---------- pick_random ----------
 def test_random_never_repeats_the_last_one(movies):
@@ -281,21 +250,17 @@ def test_random_never_repeats_the_last_one(movies):
     for _ in range(200):
         assert pick_random(movies, last) is not last
 
-
 def test_random_with_a_single_movie_returns_it(movies):
     only = [movies[0]]
     assert pick_random(only, movies[0]) is movies[0]
 
-
 def test_random_without_last(movies):
     assert pick_random(movies, None) in movies
-
 
 def test_random_uses_random_choice(movies, monkeypatch):
     # Replace random.choice so the result is predictable
     monkeypatch.setattr(boxdlist.random, "choice", lambda seq: seq[-1])
     assert pick_random(movies, None) is movies[-1]
-
 
 # ---------- config ----------
 def test_config_save_and_read(tmp_path, monkeypatch):
@@ -303,18 +268,15 @@ def test_config_save_and_read(tmp_path, monkeypatch):
     save_last_path("/tmp/w.csv")
     assert read_last_path() == "/tmp/w.csv"
 
-
 def test_config_missing_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(boxdlist, "CONFIG_FILE", tmp_path / "missing.json")
     assert read_last_path() is None
-
 
 def test_config_corrupted_returns_none(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.json"
     cfg.write_text("{this is not json", encoding="utf-8")
     monkeypatch.setattr(boxdlist, "CONFIG_FILE", cfg)
     assert read_last_path() is None
-
 
 def test_config_save_in_missing_folder_does_not_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(boxdlist, "CONFIG_FILE",
@@ -328,7 +290,6 @@ def test_config_reads_old_key(tmp_path, monkeypatch):
     cfg.write_text('{"ultimo_csv": "/tmp/old.csv"}', encoding="utf-8")
     monkeypatch.setattr(boxdlist, "CONFIG_FILE", cfg)
     assert read_last_path() == "/tmp/old.csv"
-
 
 def test_config_new_key_wins_over_old(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.json"
@@ -492,7 +453,6 @@ def test_valid_window_size(value, expected):
     assert valid_window_size(value) == expected
     
 SCREEN = (0, 0, 1920, 1080)
-
 @pytest.mark.parametrize("size, screen, expected", [
     ("900x650", SCREEN, "900x650"),                          # no position: unchanged
     ("900x650+120+80", SCREEN, "900x650+120+80"),            # inside: kept
@@ -661,7 +621,6 @@ def test_fetch_latest_release_returns_the_data(monkeypatch):
                         fake_urlopen(b'{"tag_name": "v1.0.9"}'))
     assert fetch_latest_release() == {"tag_name": "v1.0.9"}
 
-
 def test_fetch_latest_release_invalid_json_returns_none(monkeypatch):
     monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
                         fake_urlopen(b"this is not json"))
@@ -690,7 +649,6 @@ def test_download_file_success(monkeypatch, tmp_path):
     assert download_file("https://x/setup.exe", target) is True
     assert calls == [("https://x/setup.exe", target)]
 
-
 def test_download_file_failure_returns_false(monkeypatch, tmp_path):
     def fail(url, target):
         raise OSError("connection lost")
@@ -705,13 +663,11 @@ def test_set_app_version_changes_only_that_line(tmp_path):
     build.set_app_version("1.0.1", str(path))
     assert path.read_text(encoding="utf-8") == 'X = 1\nAPP_VERSION = "1.0.1"\nY = 2\n'
 
-
 def test_set_app_version_keeps_windows_line_endings(tmp_path):
     path = tmp_path / "app.py"
     path.write_bytes(b'APP_VERSION = "1.0.0"\r\nY = 2\r\n')
     build.set_app_version("1.0.1", str(path))
     assert path.read_bytes() == b'APP_VERSION = "1.0.1"\r\nY = 2\r\n'
-
 
 def test_set_app_version_stops_if_line_is_missing(tmp_path):
     path = tmp_path / "app.py"
@@ -725,7 +681,6 @@ def test_find_iscc_prefers_the_path(monkeypatch):
     monkeypatch.setattr(build.shutil, "which", lambda name: "C:/tools/ISCC.exe")
     assert build.find_iscc() == "C:/tools/ISCC.exe"
 
-
 def test_find_iscc_uses_fallback_path(monkeypatch, tmp_path):
     fake = tmp_path / "ISCC.exe"
     fake.write_text("", encoding="utf-8")
@@ -733,38 +688,39 @@ def test_find_iscc_uses_fallback_path(monkeypatch, tmp_path):
     monkeypatch.setattr(build, "ISCC_PATH", str(fake))
     assert build.find_iscc() == str(fake)
 
-
 def test_find_iscc_returns_none_if_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(build.shutil, "which", lambda name: None)
     monkeypatch.setattr(build, "ISCC_PATH", str(tmp_path / "nope.exe"))
     assert build.find_iscc() is None
     
-# ---------- remove_movie ----------
+# ---------- remove_movies ----------
 def test_remove_movie_removes_only_the_target(movies):
-    result = remove_movie(movies, movies[1])
+    result = remove_movies(movies, [movies[1]])
     assert names(result) == ["Amélie", "Cidade de Deus", "No Year"]
-
 
 def test_remove_movie_with_duplicates_removes_only_one():
     # two movies with the same data, but they are different objects
     first, second = movie("Same"), movie("Same")
-    result = remove_movie([first, second], first)
+    result = remove_movies([first, second], [first])
     assert len(result) == 1
     assert result[0] is second
 
 
 def test_remove_movie_does_not_change_original_list(movies):
     original = list(movies)
-    remove_movie(movies, movies[0])
+    remove_movies(movies, [movies[0]])
     assert movies == original
-
+    
+def test_remove_two_movies_at_once():
+    a, b, c, d = movie("A"), movie("B"), movie("C"), movie("D")
+    result = remove_movies([a, b, c, d], [b, d])
+    assert names(result) == ["A", "C"]
 
 # ---------- delete in the interface ----------
 def confirm_delete(monkeypatch, answer=True):
     # Fake the "Are you sure?" popup
     monkeypatch.setattr(boxdlist.messagebox, "askyesno",
                         lambda *args, **kwargs: answer)
-
 
 def test_delete_selected_updates_list_and_csv(app, movies, tmp_path, monkeypatch):
     path = str(tmp_path / "w.csv")
@@ -777,7 +733,6 @@ def test_delete_selected_updates_list_and_csv(app, movies, tmp_path, monkeypatch
     assert "Blade Runner" not in table_names(app)
     assert app.counter.cget("text") == "3 / 3"
     assert "Blade Runner" not in names(load_movies(path)[0])
-
 
 def test_delete_selected_with_filter_keeps_the_other_movies_in_csv(
         app, movies, tmp_path, monkeypatch):
@@ -793,7 +748,6 @@ def test_delete_selected_with_filter_keeps_the_other_movies_in_csv(
     app.delete_selected()
     assert names(load_movies(path)[0]) == [
         "Amélie", "Cidade de Deus", "No Year"]
-
 
 def test_delete_selected_cancel_keeps_everything(app, movies, monkeypatch):
     confirm_delete(monkeypatch, answer=False)
@@ -843,7 +797,6 @@ def test_delete_selected_without_csv_still_removes_from_list(
     app.delete_selected()
     assert "Amélie" not in table_names(app)
 
-
 def test_delete_updates_decade_dropdown(app, movies, monkeypatch):
     confirm_delete(monkeypatch)
     monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
@@ -852,7 +805,6 @@ def test_delete_updates_decade_dropdown(app, movies, monkeypatch):
     app.table.selection_set("1")   # Blade Runner, the only 1980s movie
     app.delete_selected()
     assert list(app.decade.cget("values")) == ["All", "2000s (2)"]
-
 
 def test_delete_last_movie_of_selected_decade_resets_filter(
         app, movies, monkeypatch):
@@ -902,7 +854,6 @@ def test_import_shows_new_movies_note(app, movies, tmp_path, monkeypatch):
     app.import_csv()
     assert app.new_label.cget("text") == "2 new movies since last time"
 
-
 def test_first_import_shows_no_note(app, movies, tmp_path, monkeypatch):
     path = str(tmp_path / "w.csv")
     save_movies(path, movies)
@@ -913,7 +864,6 @@ def test_first_import_shows_no_note(app, movies, tmp_path, monkeypatch):
                         lambda *a, **k: None)
     app.import_csv()   # the app starts empty
     assert app.new_label.cget("text") == ""
-
 
 def test_set_movies_clears_new_movies_note(app, movies):
     app.new_label.config(text="2 new movies since last time")
@@ -927,18 +877,15 @@ def quiet_import(monkeypatch):
     monkeypatch.setattr(boxdlist.messagebox, "showwarning",
                         lambda *a, **k: None)
 
-
 def csv_file(tmp_path, items, name="w.csv"):
     # as_posix gives forward slashes, like tkdnd sends on Windows
     path = tmp_path / name
     save_movies(str(path), items)
     return path.as_posix()
 
-
 def drop(app, text):
     # on_drop only reads event.data
     app.on_drop(SimpleNamespace(data=text))
-
 
 def test_drop_csv_loads_movies(app, movies, tmp_path, monkeypatch):
     quiet_import(monkeypatch)
@@ -966,7 +913,6 @@ def test_drop_multiple_files_loads_only_the_first(app, movies, tmp_path, monkeyp
     second = csv_file(tmp_path, movies, name="b.csv")
     drop(app, "{" + first + "} {" + second + "}")
     assert app.counter.cget("text") == "2 / 2"
-
 
 def test_drop_non_csv_shows_message_and_keeps_list(app, movies, tmp_path, monkeypatch):
     shown = []
@@ -1012,7 +958,6 @@ def test_load_path_shows_status_message(app, movies, tmp_path, monkeypatch):
     assert app.status.cget("text") == "3 movies imported"
     assert warnings == []
 
-
 def test_load_path_with_warning_has_no_status_message(app, movies, tmp_path, monkeypatch):
     quiet_import(monkeypatch)
     app.status.config(text="")
@@ -1020,13 +965,11 @@ def test_load_path_with_warning_has_no_status_message(app, movies, tmp_path, mon
     app.load_path(csv_file(tmp_path, movies))
     assert app.status.cget("text") == ""
 
-
 def test_new_movies_note_without_warning(app, movies, tmp_path, monkeypatch):
     quiet_import(monkeypatch)
     app.set_movies(movies[:2])
     app.load_path(csv_file(tmp_path, movies[:3]))   # all complete
     assert app.new_label.cget("text") == "1 new movie since last time"
-
 
 def test_show_status_clears_itself(app, monkeypatch):
     scheduled = []
@@ -1039,7 +982,6 @@ def test_show_status_clears_itself(app, monkeypatch):
     assert scheduled[0][0] == 4000
     scheduled[0][1]()   # run the clear function
     assert app.status.cget("text") == ""
-
 # ---------- count decades ----------
 def test_count_movies_by_decade(movies):
     # "No Year" is ignored, 2001 and 2002 share the 2000s
@@ -1049,7 +991,7 @@ def test_update_decades_keeps_selected_decade(app, movies):
     app.set_movies(movies)
     app.decade.set("2000s (2)")
     app.select_decade()
-    app.movies = remove_movie(app.movies, movies[1])
+    app.movies = remove_movies(app.movies, [movies[1]])
     app.update_decades()
     assert app.decade.get() == "2000s (2)"
     assert app.year_min.get() == "2000"
@@ -1058,14 +1000,13 @@ def test_update_decades_updates_count_of_selected_decade(app, movies):
     app.set_movies(movies)
     app.decade.set("2000s (2)")
     app.select_decade()
-    app.movies = remove_movie(app.movies, movies[2])
+    app.movies = remove_movies(app.movies, [movies[2]])
     app.update_decades()
     assert app.decade.get() == "2000s (1)"
     assert app.year_min.get() == "2000"
     
 # ---------- filter by dates ----------
 TODAY = date(2024, 4, 1)
-
 
 def test_filter_recent_without_days_returns_everything(movies):
     assert filter_recent(movies, None, TODAY) == movies
@@ -1075,12 +1016,10 @@ def test_filter_recent_30_days(movies):
     # limit is 2024-03-02, so Amélie (03-01) is just outside
     assert names(filter_recent(movies, 30, TODAY)) == ["No Year"]
 
-
 def test_filter_recent_60_days(movies):
     # limit is 2024-02-01 (2024 is a leap year), only Blade Runner is older
     assert names(filter_recent(movies, 60, TODAY)) == [
         "Amélie", "Cidade de Deus", "No Year"]
-
 
 def test_filter_recent_includes_the_limit_day():
     items = [movie("Edge", date="2024-03-02")]   # exactly 30 days ago
@@ -1090,7 +1029,6 @@ def test_filter_recent_includes_the_limit_day():
 def test_filter_recent_ignores_missing_or_invalid_dates():
     items = [movie("Empty", date=""), movie("Broken", date="2024-13-45")]
     assert filter_recent(items, 365, TODAY) == []
-
 
 def test_filter_recent_does_not_change_original_list(movies):
     original = list(movies)
@@ -1102,18 +1040,15 @@ def days_ago(n):
     # a date n days before today, as the CSV writes it
     return (date.today() - timedelta(days=n)).isoformat()
 
-
 def recent_movies():
     # far from the 7, 30 and 365 day limits, so the tests never depend on the hour
     return [movie("New", date=days_ago(2)),
             movie("Month", date=days_ago(20)),
             movie("Old", date=days_ago(400))]
 
-
 def test_recent_dropdown_lists_options(app):
     assert list(app.recent.cget("values")) == [
         "All", "Last 7 days", "Last 30 days", "Last year"]
-
 
 def test_recent_filter_last_7_days(app):
     app.set_movies(recent_movies())
@@ -1121,13 +1056,11 @@ def test_recent_filter_last_7_days(app):
     app.update_list()
     assert table_names(app) == ["New"]
 
-
 def test_recent_filter_last_30_days(app):
     app.set_movies(recent_movies())
     app.recent.set("Last 30 days")
     app.update_list()
     assert table_names(app) == ["New", "Month"]
-
 
 def test_recent_filter_last_year(app):
     app.set_movies(recent_movies())
@@ -1135,13 +1068,11 @@ def test_recent_filter_last_year(app):
     app.update_list()
     assert table_names(app) == ["New", "Month"]
 
-
 def test_recent_filter_updates_counter(app):
     app.set_movies(recent_movies())
     app.recent.set("Last 7 days")
     app.update_list()
     assert app.counter.cget("text") == "1 / 3"
-
 
 def test_recent_filter_combines_with_search(app):
     app.set_movies(recent_movies())
@@ -1150,18 +1081,15 @@ def test_recent_filter_combines_with_search(app):
     app.update_list()
     assert table_names(app) == ["Month"]
 
-
 def test_recent_filter_hides_movies_without_date(app):
     app.set_movies([movie("No Date", date=""), *recent_movies()])
     app.recent.set("Last year")
     app.update_list()
     assert "No Date" not in table_names(app)
 
-
 def test_recent_all_keeps_movies_without_date(app):
     app.set_movies([movie("No Date", date=""), *recent_movies()])
     assert "No Date" in table_names(app)
-
 
 def test_clear_filters_resets_recent(app):
     app.set_movies(recent_movies())
@@ -1171,14 +1099,12 @@ def test_clear_filters_resets_recent(app):
     assert app.recent.get() == "All"
     assert len(table_names(app)) == 3
 
-
 def test_set_movies_resets_recent(app):
     # importing a new CSV starts without the old filter
     app.set_movies(recent_movies())
     app.recent.set("Last 7 days")
     app.set_movies(recent_movies())
     assert app.recent.get() == "All"
-
 
 def test_recent_dropdown_is_bound(app):
     assert app.recent.bind("<<ComboboxSelected>>") != ""
@@ -1190,17 +1116,14 @@ def test_insert_movie_puts_it_at_the_position(movies):
     assert names(result) == ["Amélie", "Extra", "Blade Runner",
                              "Cidade de Deus", "No Year"]
 
-
 def test_insert_movie_past_the_end_appends(movies):
     extra = movie("Extra")
     assert insert_movie(movies, extra, 99)[-1] is extra
-
 
 def test_insert_movie_does_not_change_original_list(movies):
     original = list(movies)
     insert_movie(movies, movie("Extra"), 0)
     assert movies == original
-
 
 # ---------- undo delete in the interface ----------
 def test_undo_delete_restores_list_and_csv(app, movies, tmp_path, monkeypatch):
@@ -1218,7 +1141,6 @@ def test_undo_delete_restores_list_and_csv(app, movies, tmp_path, monkeypatch):
     assert names(load_movies(path)[0]) == names(movies)
     assert app.status.cget("text") == "Restored 'Blade Runner'"
 
-
 def test_undo_delete_with_filter_keeps_original_position(
         app, movies, monkeypatch):
     confirm_delete(monkeypatch)
@@ -1231,7 +1153,6 @@ def test_undo_delete_with_filter_keeps_original_position(
     app.undo_delete()
     assert names(app.movies) == names(movies)
 
-
 def test_delete_shows_undo_hint(app, movies, monkeypatch):
     confirm_delete(monkeypatch)
     monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
@@ -1240,12 +1161,10 @@ def test_delete_shows_undo_hint(app, movies, monkeypatch):
     app.delete_selected()
     assert app.status.cget("text") == "Deleted 'Amélie' (Ctrl+Z to undo)"
 
-
 def test_undo_without_delete_does_nothing(app, movies):
     app.set_movies(movies)
     app.undo_delete()
     assert len(app.movies) == 4
-
 
 def test_undo_only_works_once(app, movies, monkeypatch):
     confirm_delete(monkeypatch)
@@ -1256,7 +1175,6 @@ def test_undo_only_works_once(app, movies, monkeypatch):
     app.undo_delete()
     app.undo_delete()   # nothing left to undo, must not add it twice
     assert len(app.movies) == 4
-
 
 def test_undo_save_error_keeps_the_undo_available(app, movies, monkeypatch):
     errors = []
@@ -1277,7 +1195,6 @@ def test_undo_save_error_keeps_the_undo_available(app, movies, monkeypatch):
     assert len(app.movies) == 3          # the movie was not restored
     assert app.last_deleted is not None  # and the user can try again
 
-
 def test_set_movies_clears_undo(app, movies, monkeypatch):
     confirm_delete(monkeypatch)
     monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
@@ -1287,11 +1204,211 @@ def test_set_movies_clears_undo(app, movies, monkeypatch):
     app.set_movies(movies)   # like importing a new CSV
     assert app.last_deleted is None
 
-
 def test_ctrl_z_shortcuts_undo_delete(app, monkeypatch):
     called = []
     monkeypatch.setattr(app, "undo_delete", lambda: called.append(1))
+    # fixed focus, so the test does not depend on earlier tests
+    monkeypatch.setattr(app, "focus_get", lambda: app.table)
     press(app, "<Control-z>")
     assert len(called) == 1
     press(app, "<Control-Z>")
     assert len(called) == 2
+
+def test_ctrl_z_in_text_box_does_not_undo(app, monkeypatch):
+    called = []
+    monkeypatch.setattr(app, "undo_delete", lambda: called.append(1))
+    monkeypatch.setattr(app, "focus_get", lambda: app.search_entry)
+    app.on_undo_key()
+    assert called == []
+
+def test_ctrl_z_in_dropdown_does_not_undo(app, monkeypatch):
+    called = []
+    monkeypatch.setattr(app, "undo_delete", lambda: called.append(1))
+    monkeypatch.setattr(app, "focus_get", lambda: app.decade)
+    app.on_undo_key()
+    assert called == []
+    
+def test_delete_several_movies_asks_once_and_removes_all(
+        app, movies, tmp_path, monkeypatch):
+    path = str(tmp_path / "w.csv")
+    save_movies(path, movies)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: path)
+    asked = []
+    monkeypatch.setattr(boxdlist.messagebox, "askyesno",
+                        lambda *args, **kwargs: asked.append(args) or True)
+    app.set_movies(movies)
+    app.table.selection_set("0", "2")   # Amélie and Cidade de Deus
+    app.delete_selected()
+    assert len(asked) == 1               # one question for both
+    assert names(app.movies) == ["Blade Runner", "No Year"]
+    assert names(load_movies(path)[0]) == ["Blade Runner", "No Year"]
+    assert app.status.cget("text") == "Deleted 2 movies (Ctrl+Z to undo)"
+
+
+def test_undo_several_movies_restores_original_order(
+        app, movies, tmp_path, monkeypatch):
+    path = str(tmp_path / "w.csv")
+    save_movies(path, movies)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: path)
+    confirm_delete(monkeypatch)
+    app.set_movies(movies)
+    app.table.selection_set("1", "3")   # Blade Runner and No Year
+    app.delete_selected()
+    app.undo_delete()
+    assert names(app.movies) == names(movies)
+    assert names(load_movies(path)[0]) == names(movies)
+    assert app.status.cget("text") == "Restored 2 movies"
+
+
+def test_undo_several_movies_with_filter_keeps_positions(
+        app, movies, monkeypatch):
+    confirm_delete(monkeypatch)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: None)
+    app.set_movies(movies)
+    app.search.set("de")   # shows only Blade Runner and Cidade de Deus
+    app.update_list()
+    app.table.selection_set(*app.table.get_children())
+    app.delete_selected()
+    app.undo_delete()
+    assert names(app.movies) == names(movies)
+    
+# ---------- drag to select ----------
+def mouse(y, state=0):
+    # on_press and on_drag only read y and state
+    return SimpleNamespace(x=10, y=y, state=state)
+
+def fake_rows(app, monkeypatch):
+    # y = 0 is row "0", y = 1 is row "1", and so on; anything else is blank
+    monkeypatch.setattr(app.table, "identify_row",
+                        lambda y: str(y) if y in (0, 1, 2, 3) else "")
+
+def test_drag_selects_the_rows_between(app, movies, monkeypatch):
+    app.set_movies(movies)
+    fake_rows(app, monkeypatch)
+    app.on_press(mouse(0))
+    app.on_drag(mouse(2))
+    assert set(app.table.selection()) == {"0", "1", "2"}
+
+def test_drag_upwards_also_works(app, movies, monkeypatch):
+    app.set_movies(movies)
+    fake_rows(app, monkeypatch)
+    app.on_press(mouse(3))
+    app.on_drag(mouse(1))
+    assert set(app.table.selection()) == {"1", "2", "3"}
+
+def test_drag_back_shrinks_the_selection(app, movies, monkeypatch):
+    app.set_movies(movies)
+    fake_rows(app, monkeypatch)
+    app.on_press(mouse(0))
+    app.on_drag(mouse(3))
+    app.on_drag(mouse(1))
+    assert set(app.table.selection()) == {"0", "1"}
+
+def test_drag_started_outside_the_rows_does_nothing(app, movies, monkeypatch):
+    app.set_movies(movies)
+    fake_rows(app, monkeypatch)
+    app.table.selection_set("3")
+    app.on_press(mouse(99))   # blank area or header
+    app.on_drag(mouse(1))
+    assert app.table.selection() == ("3",)
+
+def test_drag_with_ctrl_is_left_alone(app, movies, monkeypatch):
+    app.set_movies(movies)
+    fake_rows(app, monkeypatch)
+    app.table.selection_set("3")
+    app.on_press(mouse(0, state=0x4))   # Ctrl held
+    app.on_drag(mouse(1))
+    assert app.table.selection() == ("3",)
+
+def test_drag_over_blank_area_keeps_the_selection(app, movies, monkeypatch):
+    app.set_movies(movies)
+    fake_rows(app, monkeypatch)
+    app.on_press(mouse(0))
+    app.on_drag(mouse(2))
+    app.on_drag(mouse(99))   # mouse went below the last row
+    assert set(app.table.selection()) == {"0", "1", "2"}
+    
+# ---------- open several links ----------
+def test_open_link_opens_every_selected_movie(app, movies, monkeypatch):
+    opened = []
+    monkeypatch.setattr(boxdlist.webbrowser, "open",
+                        lambda url: opened.append(url))
+    items = [movie("A", url="https://boxd.it/a"),
+             movie("B", url="https://boxd.it/b")]
+    app.set_movies(items)
+    app.table.selection_set("0", "1")
+    app.open_link()
+    assert opened == ["https://boxd.it/a", "https://boxd.it/b"]
+    
+def fake_browser(monkeypatch):
+    # Replaces webbrowser.open so no real page opens; returns the list of links
+    opened = []
+    monkeypatch.setattr(boxdlist.webbrowser, "open",
+                        lambda url: opened.append(url))
+    return opened
+
+
+def linked_movies(count):
+    # Movies M0, M1, ... that all have a link
+    return [movie(f"M{i}", url=f"https://boxd.it/{i}") for i in range(count)]
+
+
+def select_all_rows(app):
+    app.table.selection_set(*app.table.get_children())
+
+
+def test_open_link_skips_movies_without_link(app, monkeypatch):
+    opened = fake_browser(monkeypatch)
+    app.set_movies([movie("A", url="https://boxd.it/a"),
+                    movie("B", url=""),
+                    movie("C", url="https://boxd.it/c")])
+    select_all_rows(app)
+    app.open_link()
+    assert opened == ["https://boxd.it/a", "https://boxd.it/c"]
+
+
+def test_open_link_with_no_links_shows_message(app, monkeypatch):
+    opened = fake_browser(monkeypatch)
+    shown = []
+    monkeypatch.setattr(boxdlist.messagebox, "showinfo",
+                        lambda *args, **kwargs: shown.append(args))
+    app.set_movies([movie("A", url=""), movie("B", url="")])
+    select_all_rows(app)
+    app.open_link()
+    assert opened == []
+    assert len(shown) == 1
+    assert shown[0][1] == "None of these movies has a link."
+
+
+def test_open_link_many_pages_cancelled_opens_nothing(app, monkeypatch):
+    opened = fake_browser(monkeypatch)
+    asked = []
+    monkeypatch.setattr(boxdlist.messagebox, "askyesno",
+                        lambda *args, **kwargs: asked.append(args) or False)
+    app.set_movies(linked_movies(6))   # one more than the limit
+    select_all_rows(app)
+    app.open_link()
+    assert len(asked) == 1
+    assert "6" in asked[0][1]   # the question shows how many pages
+    assert opened == []
+
+
+def test_open_link_many_pages_confirmed_opens_all(app, monkeypatch):
+    opened = fake_browser(monkeypatch)
+    confirm_delete(monkeypatch, answer=True)   # fakes any yes/no popup
+    app.set_movies(linked_movies(6))
+    select_all_rows(app)
+    app.open_link()
+    assert len(opened) == 6
+
+
+def test_open_link_at_the_limit_does_not_ask(app, monkeypatch):
+    opened = fake_browser(monkeypatch)
+    asked = []
+    monkeypatch.setattr(boxdlist.messagebox, "askyesno",
+                        lambda *args, **kwargs: asked.append(args) or True)
+    app.set_movies(linked_movies(boxdlist.MAX_OPEN_AT_ONCE))
+    select_all_rows(app)
+    app.open_link()
+    assert asked == []   # exactly 5 pages: no question
+    assert len(opened) == boxdlist.MAX_OPEN_AT_ONCE
