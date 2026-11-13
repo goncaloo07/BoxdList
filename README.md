@@ -35,6 +35,8 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 | `Enter` | Open the selected film on Letterboxd |
 | `Delete` | Delete the selected film |
 | `Ctrl+Z` | Undo the last delete |
+| `Esc` | Deselect the film and leave the search box |
+| `Ctrl+Backspace` | Clear all filters |
 
 ## Getting your watchlist from Letterboxd
 

@@ -554,6 +554,8 @@ class App(TkinterDnD.Tk):
         self.drag_start: str | None = None   # row where the mouse drag began
         self.table.bind("<Button-1>", self.on_press, add="+")
         self.table.bind("<B1-Motion>", self.on_drag, add="+")
+        self.bind("<Escape>", lambda _: self.clear_selection())
+        self.bind("<Control-BackSpace>", lambda _: self.clear_filters())
 
         self.dark_title_bar()   # ask Windows for a dark title bar
         self.drop_target_register(DND_FILES)
@@ -987,6 +989,12 @@ class App(TkinterDnD.Tk):
         year = f" ({f['year']})" if f["year"] else ""
         self.result.config(text=f["name"] + year)
         self.table.focus_set()
+    
+    def clear_selection(self) -> None:
+        """Deselects the rows and takes the focus out of the filter boxes."""
+        self.table.selection_remove(self.table.selection())
+        self.search_entry.selection_clear()   # drops the highlighted text, if any
+        self.table.focus_set()                # leaves the search box and the filters
         
     def on_double_click(self, event) -> None:
         """Opens the link only if a row was double-clicked, not the header."""

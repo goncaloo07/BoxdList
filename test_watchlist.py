@@ -1329,7 +1329,7 @@ def test_drag_over_blank_area_keeps_the_selection(app, movies, monkeypatch):
     assert set(app.table.selection()) == {"0", "1", "2"}
     
 # ---------- open several links ----------
-def test_open_link_opens_every_selected_movie(app, movies, monkeypatch):
+def test_open_link_opens_every_selected_movie(app, monkeypatch):
     opened = []
     monkeypatch.setattr(boxdlist.webbrowser, "open",
                         lambda url: opened.append(url))
@@ -1412,3 +1412,38 @@ def test_open_link_at_the_limit_does_not_ask(app, monkeypatch):
     app.open_link()
     assert asked == []   # exactly 5 pages: no question
     assert len(opened) == boxdlist.MAX_OPEN_AT_ONCE
+    
+# ---------- escape and ctrl backspace ----------
+def test_clear_selection_removes_selection(app, movies):
+    app.set_movies(movies)
+    app.table.selection_set("1")
+    app.clear_selection()
+    assert app.table.selection() == ()
+
+def test_clear_selection_keeps_the_filters(app, movies):
+    app.set_movies(movies)
+    app.search.set("blade")
+    app.update_list()
+    app.table.selection_set("0")
+    app.clear_selection()
+    assert app.search.get() == "blade"
+    assert len(table_names(app)) == 1
+
+def test_escape_shortcut_clears_selection(app, monkeypatch):
+    called = []
+    monkeypatch.setattr(app, "clear_selection", lambda: called.append(1))
+    press(app, "<Escape>")
+    assert len(called) == 1
+
+def test_clear_selection_leaves_the_search_box(app):
+    press(app, "<Control-f>")
+    assert app.focus_get() is app.search_entry
+    app.clear_selection()
+    assert app.focus_get() is app.table
+    assert not app.search_entry.selection_present()
+
+def test_ctrl_backspace_shortcut_clears_filters(app, monkeypatch):
+    called = []
+    monkeypatch.setattr(app, "clear_filters", lambda: called.append(1))
+    press(app, "<Control-BackSpace>")
+    assert len(called) == 1
