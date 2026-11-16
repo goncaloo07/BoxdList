@@ -48,6 +48,7 @@ RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
                   "Last 30 days": 30, "Last year": 365}
 MAX_OPEN_AT_ONCE = 5 # above this, ask before opening many pages
+DEFAULT_SORT_COLUMN = "date"   # sort used when nothing valid was saved
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -351,6 +352,14 @@ def valid_reverse_order(value) -> bool:
         return value
     return False
 
+def initial_sort(config: dict) -> tuple[str, bool]:
+    """Returns (column, reverse) to start with: the saved sort, or the default."""
+    column = valid_sort_column(config.get("sort_column"))
+    if column is None:
+        # nothing valid saved: oldest added first
+        return DEFAULT_SORT_COLUMN, False
+    return column, valid_reverse_order(config.get("reverse_order"))
+
 # ---------- Resources (icon) ----------
 def resource_path(relative: str) -> Path:
     """Finds a file both when running the code and inside the .exe."""
@@ -403,8 +412,7 @@ class App(TkinterDnD.Tk):
 
         self.movies: list[dict] = []     # original list, in CSV order
         self.visible: list[dict] = []    # filtered and sorted (what is seen)
-        self.sort_column = valid_sort_column(config.get("sort_column"))
-        self.reverse_order = valid_reverse_order(config.get("reverse_order"))
+        self.sort_column, self.reverse_order = initial_sort(config)
         self.last_randomized: dict | None = None
         self.update_version: str | None = None
         self.update_url: str | None = None

@@ -6,7 +6,8 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movies,
-                      count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie, filter_complete)
+                      count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie, filter_complete,
+                      initial_sort)
 import build
 from datetime import date, timedelta
 
@@ -1515,3 +1516,21 @@ def test_set_movies_unchecks_complete_only(app, movies):
     app.complete_only.set(True)
     app.set_movies(movies)
     assert app.complete_only.get() is False
+    
+# ---------- initial_sort ----------
+def test_initial_sort_defaults_to_oldest_added_first():
+    assert initial_sort({}) == ("date", False)
+
+def test_initial_sort_without_saved_column_ignores_direction():
+    assert initial_sort({"reverse_order": True}) == ("date", False)
+
+def test_initial_sort_null_column_uses_default():
+    # on_close saves null when the user never clicked a header
+    assert initial_sort({"sort_column": None}) == ("date", False)
+
+def test_initial_sort_invalid_column_uses_default():
+    assert initial_sort({"sort_column": "banana", "reverse_order": True}) == ("date", False)
+
+def test_initial_sort_keeps_the_saved_choice():
+    config = {"sort_column": "name", "reverse_order": True}
+    assert initial_sort(config) == ("name", True)
