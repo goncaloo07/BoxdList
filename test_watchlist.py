@@ -6,7 +6,7 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       pick_random, read_last_path, save_last_path,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movies,
-                      count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie)
+                      count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie, filter_complete)
 import build
 from datetime import date, timedelta
 
@@ -1463,3 +1463,55 @@ def test_counter_selected_count_goes_away(app, movies):
     app.update()
     # nothing selected, so the note must disappear
     assert app.counter.cget("text") == "4 / 4"
+    
+# ---------- filter_complete ----------
+def test_filter_complete_keeps_only_complete_movies(movies):
+    # "No Year" is the only incomplete movie in the fixture
+    assert names(filter_complete(movies)) == [
+        "Amélie", "Blade Runner", "Cidade de Deus"]
+
+def test_filter_complete_removes_movies_missing_any_field():
+    items = [movie("Full"),
+             movie("No Date", date=""),
+             movie("No Link", url=""),
+             movie("No Year", year="")]
+    assert names(filter_complete(items)) == ["Full"]
+
+def test_filter_complete_does_not_change_original_list(movies):
+    original = list(movies)
+    filter_complete(movies)
+    assert movies == original
+
+# ---------- complete filter in the interface ----------
+def test_complete_only_hides_incomplete_movies(app, movies):
+    app.set_movies(movies)
+    app.complete_only.set(True)
+    app.update_list()
+    assert "No Year" not in table_names(app)
+    assert app.counter.cget("text") == "3 / 4"
+
+def test_complete_only_off_shows_everything(app, movies):
+    app.set_movies(movies)
+    assert "No Year" in table_names(app)
+
+def test_complete_only_combines_with_search(app, movies):
+    app.set_movies(movies)
+    app.complete_only.set(True)
+    app.search.set("de")   # "Blade Runner" and "Cidade de Deus", both complete
+    app.update_list()
+    assert table_names(app) == ["Blade Runner", "Cidade de Deus"]
+
+def test_clear_filters_unchecks_complete_only(app, movies):
+    app.set_movies(movies)
+    app.complete_only.set(True)
+    app.update_list()
+    app.clear_filters()
+    assert app.complete_only.get() is False
+    assert len(table_names(app)) == 4
+
+def test_set_movies_unchecks_complete_only(app, movies):
+    # importing a new CSV starts without the old filter
+    app.set_movies(movies)
+    app.complete_only.set(True)
+    app.set_movies(movies)
+    assert app.complete_only.get() is False

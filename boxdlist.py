@@ -187,6 +187,10 @@ def filter_recent(movies: list[dict], days: int | None,
             result.append(m)
     return result
 
+def filter_complete(movies: list[dict]) -> list[dict]:
+    """Keeps only the movies that have a year, date, and link."""
+    return [m for m in movies if not is_incomplete(m)]
+
 def sort_movies(movies: list[dict], column: str | None,
                 reverse: bool) -> list[dict]:
     """Returns a sorted copy; the original list is not modified."""
@@ -475,6 +479,11 @@ class App(TkinterDnD.Tk):
         self.recent.set(NO_FILTER)
         self.recent.pack(side="left")
         self.recent.bind("<<ComboboxSelected>>", lambda _: self.update_list())
+        
+        self.complete_only = tk.BooleanVar(value=False)
+        ttk.Checkbutton(filters, text="Complete only",
+                        variable=self.complete_only,
+                        command=self.update_list).pack(side="left", padx=(self.px(10), 0))
 
         ttk.Button(filters, text="Clear filters",
                    command=self.clear_filters).pack(side="left", padx=self.px(10))
@@ -636,6 +645,20 @@ class App(TkinterDnD.Tk):
         style.configure("TFrame", background=BG)
         # Text labels
         style.configure("TLabel", background=BG, foreground=TEXT)
+        # Complete only checkbox
+        style.configure("TCheckbutton", background=BG, foreground=MUTED,
+                        indicatorbackground=SURFACE, indicatorforeground=TEXT,
+                        upperbordercolor=SCROLL, lowerbordercolor=SCROLL,
+                        focuscolor=BG,   # hides the dotted focus line
+                        indicatormargin=(0, 0, self.px(6), 0))   # space before the text
+        style.map("TCheckbutton",
+                background=[("active", BG)],
+                foreground=[("active", TEXT)],
+                indicatorbackground=[("selected", "active", GREEN_HOVER),
+                                    ("selected", GREEN),
+                                    ("active", ROW_ALT)],
+                upperbordercolor=[("selected", GREEN)],
+                lowerbordercolor=[("selected", GREEN)])
         # Secondary buttons: quiet, they only lighten a little on hover
         style.configure("TButton", background=SURFACE, foreground=TEXT,
                         borderwidth=0, padding=(self.px(10), self.px(5)),
@@ -895,6 +918,7 @@ class App(TkinterDnD.Tk):
         self.year_max.set("")
         self.decade.set(NO_FILTER)
         self.recent.set(NO_FILTER)
+        self.complete_only.set(False)
         self.update_list()
 
     # ----- Table Updates -----
@@ -919,6 +943,8 @@ class App(TkinterDnD.Tk):
                                  year_as_int(self.year_max.get()))
         days = RECENT_OPTIONS[self.recent.get()]
         filtered = filter_recent(filtered, days, date.today())
+        if self.complete_only.get():
+            filtered = filter_complete(filtered)
         self.visible = sort_movies(
             filtered, self.sort_column, self.reverse_order)
         if not any(m is self.last_randomized for m in self.visible):
