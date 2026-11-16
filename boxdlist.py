@@ -556,6 +556,8 @@ class App(TkinterDnD.Tk):
         self.table.bind("<B1-Motion>", self.on_drag, add="+")
         self.bind("<Escape>", lambda _: self.clear_selection())
         self.bind("<Control-BackSpace>", lambda _: self.clear_filters())
+        
+        self.table.bind("<<TreeviewSelect>>", lambda _: self.update_counter())
 
         self.dark_title_bar()   # ask Windows for a dark title bar
         self.drop_target_register(DND_FILES)
@@ -927,13 +929,21 @@ class App(TkinterDnD.Tk):
         for i, f in enumerate(self.visible):
             # Even rows are plain, odd rows are slightly lighter
             tag = "odd" if i % 2 else "even"
-            self.table.insert("", "end", iid=str(i), tags=(tag,),
+            self.table.insert("", "end", iid=str(i), tags=(tag,),   
                               values=(f["name"], f["year"] or EMPTY, f["date"] or EMPTY))
 
-        self.counter.config(text=f"{len(self.visible)} / {len(self.movies)}")
+        self.update_counter()
         self.update_headers()
         self.update_warning()
         self.update_buttons()
+    
+    def update_counter(self) -> None:
+        """Shows 'visible / total' and, if any rows are selected, how many."""
+        selected = len(self.table.selection())
+        text = f"{len(self.visible)} / {len(self.movies)}"
+        if selected:
+            text += f" ({selected} selected)"
+        self.counter.config(text=text)
 
     def update_headers(self) -> None:
         """Shows ▲ / ▼ on the column currently used for sorting."""

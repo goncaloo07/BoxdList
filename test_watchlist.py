@@ -1447,3 +1447,19 @@ def test_ctrl_backspace_shortcut_clears_filters(app, monkeypatch):
     monkeypatch.setattr(app, "clear_filters", lambda: called.append(1))
     press(app, "<Control-BackSpace>")
     assert len(called) == 1
+    
+# ---------- selection counter ----------    
+def test_counter_shows_selected_count(app, movies):
+    app.set_movies(movies)
+    app.table.selection_set("0", "1")
+    app.update()   # lets Tk process the selection event
+    assert app.counter.cget("text") == "4 / 4 (2 selected)"
+
+def test_counter_selected_count_goes_away(app, movies):
+    app.set_movies(movies)
+    app.table.selection_set("0", "1")
+    app.update()
+    app.table.selection_remove("0", "1")
+    app.update()
+    # nothing selected, so the note must disappear
+    assert app.counter.cget("text") == "4 / 4"
