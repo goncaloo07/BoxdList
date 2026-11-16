@@ -285,6 +285,18 @@ def count_new_movies(old: list[dict], new: list[dict]) -> int:
     known = {movie_key(m) for m in old}   # a set makes the lookup fast
     return sum(1 for m in new if movie_key(m) not in known)
 
+def count_duplicates(movies: list[dict]) -> int:
+    """Counts the extra copies: the same movie 3 times counts as 2."""
+    seen = set()
+    count = 0
+    for m in movies:
+        key = movie_key(m)
+        if key in seen:
+            count += 1
+        else:
+            seen.add(key)
+    return count
+
 # ---------- Configuration (remember the last CSV) ----------
 def read_last_path() -> str | None:
     data = read_config()
@@ -781,12 +793,14 @@ class App(TkinterDnD.Tk):
         self.set_movies(movies)
         
         incomplete = sum(is_incomplete(f) for f in movies)
-        if ignored or incomplete:
+        duplicates = count_duplicates(movies)
+        if ignored or incomplete or duplicates:
             messagebox.showwarning(
                 "Import",
                 f"{len(movies)} movies imported.\n"
                 f"- {ignored} lines ignored (missing name or malformed)\n"
-                f"- {incomplete} movies with missing data (shown with {EMPTY})")
+                f"- {incomplete} movies with missing data (shown with {EMPTY})\n"
+                f"- {duplicates} duplicate {'movie' if duplicates == 1 else 'movies'} (same name and year)")
         else:
             self.show_status(f"{len(movies)} movies imported")
                     

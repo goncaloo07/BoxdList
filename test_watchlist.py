@@ -7,7 +7,7 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movies,
                       count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie, filter_complete,
-                      initial_sort)
+                      initial_sort, count_duplicates)
 import build
 from datetime import date, timedelta
 
@@ -1534,3 +1534,42 @@ def test_initial_sort_invalid_column_uses_default():
 def test_initial_sort_keeps_the_saved_choice():
     config = {"sort_column": "name", "reverse_order": True}
     assert initial_sort(config) == ("name", True)
+    
+# ---------- count_duplicates ----------
+def test_count_duplicates_without_repeats(movies):
+    assert count_duplicates(movies) == 0
+
+def test_count_duplicates_one_extra_copy():
+    assert count_duplicates([movie("A"), movie("A")]) == 1
+
+def test_count_duplicates_counts_only_the_extra_copies():
+    # the same movie 3 times means 2 extra copies
+    assert count_duplicates([movie("A"), movie("A"), movie("A")]) == 2
+
+def test_count_duplicates_same_name_different_year_is_not_a_duplicate():
+    # remakes share a name but are different movies
+    assert count_duplicates([movie("A", "2000"), movie("A", "2001")]) == 0
+
+def test_count_duplicates_empty_list():
+    assert count_duplicates([]) == 0
+
+# ---------- duplicates in the import ----------
+def test_import_with_duplicates_shows_warning(app, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(boxdlist.messagebox, "showwarning",
+                        lambda *args, **kwargs: warnings.append(args))
+    app.status.config(text="")
+    # both movies are complete, so only the duplicate can trigger the warning
+    app.load_path(csv_file(tmp_path, [movie("A"), movie("A")]))
+    assert len(warnings) == 1
+    assert "1 duplicate" in warnings[0][1]
+    assert app.status.cget("text") == ""   # the status message is not used
+
+def test_import_without_duplicates_shows_no_warning(app, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(boxdlist.messagebox, "showwarning",
+                        lambda *args, **kwargs: warnings.append(args))
+    app.load_path(csv_file(tmp_path, [movie("A"), movie("B")]))
+    assert warnings == []
