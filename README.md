@@ -14,6 +14,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Filter by when you added the film (last 7 days, last 30 days or last year)
 - Remembers the window size, its position and the sort order
 - Random pick from the films currently shown, never repeating the previous one
+- See details about the movie by selecting it
 - Double-click a film (or press `Enter`) to open its Letterboxd page
 - Right-click a film to open its page, copy its name or delete it
 - Delete a film with the `Delete` key or the right-click menu (it asks first, and the film is also removed from your CSV file)

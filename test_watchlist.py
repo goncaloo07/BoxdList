@@ -7,9 +7,10 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movies,
                       count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie, filter_complete,
-                      initial_sort, count_duplicates)
+                      initial_sort, count_duplicates, format_runtime, details_line)
 import build
 from datetime import date, timedelta
+import urllib.error
 
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
@@ -316,12 +317,19 @@ def _window():
     window.destroy()
     
 @pytest.fixture
-def app(_window):
+def app(_window, monkeypatch):
+    # UI tests must never call the real proxy
+    monkeypatch.setattr(boxdlist, "fetch_movie_details", lambda name, year: None)
     # Back to a clean state before each test
     _window.withdraw()
     _window.set_movies([])
     _window.sort_column = None
     _window.reverse_order = False
+    _window.details_cache.clear()
+    _window.details_target = None
+    _window.details_inflight.clear()
+    _window.details_failed.clear()
+    _window.summary_movies = []
     return _window
     
 def test_warning_when_no_csv(app):
@@ -443,12 +451,12 @@ def test_copy_name_puts_movie_in_clipboard(app, movies):
     
 @pytest.mark.parametrize("value, expected", [
     ("900x650", "900x650"),    # good value is kept
-    ("banana", "760x600"),     # bad text falls back
-    (12345, "760x600"),        # not even text
-    (None, "760x600"),         # key missing in the file
+    ("banana", boxdlist.DEFAULT_SIZE),     # bad text falls back
+    (12345, boxdlist.DEFAULT_SIZE),        # not even text
+    (None, boxdlist.DEFAULT_SIZE),         # key missing in the file
     ("900x650+120+80", "900x650+120+80"),     # size and position are kept
     ("900x650+-1920+0", "900x650+-1920+0"),   # negative position (second monitor)
-    ("900x650+120", "760x600"), # half a position falls back
+    ("900x650+120", boxdlist.DEFAULT_SIZE), # half a position falls back
 ])
 def test_valid_window_size(value, expected):
     assert valid_window_size(value) == expected
@@ -655,7 +663,85 @@ def test_download_file_failure_returns_false(monkeypatch, tmp_path):
         raise OSError("connection lost")
     monkeypatch.setattr(boxdlist.urllib.request, "urlretrieve", fail)
     assert download_file("https://x/setup.exe", tmp_path / "setup.exe") is False
+    
+def test_fetch_movie_details_returns_the_data(monkeypatch):
+    body = b'{"genres": ["Comedy"], "runtime": 122, "overview": "A story."}'
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", fake_urlopen(body))
+    result = boxdlist.fetch_movie_details("Amelie", "2001")
+    assert result == {"genres": ["Comedy"], "runtime": 122, "overview": "A story."}
+    
+def capture_urls(monkeypatch, body=b"{}"):
+    # Fake urlopen that remembers every address it was asked for
+    seen = []
+    def fake(url, timeout=None):
+        seen.append(url)
+        return FakeResponse(body)
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", fake)
+    return seen
 
+
+def test_fetch_movie_details_returns_the_data(monkeypatch):
+    body = b'{"genres": ["Comedy"], "runtime": 122, "overview": "A story."}'
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", fake_urlopen(body))
+    result = boxdlist.fetch_movie_details("Amelie", "2001")
+    assert result == {"genres": ["Comedy"], "runtime": 122, "overview": "A story."}
+
+
+def test_fetch_movie_details_invalid_json_returns_none(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        fake_urlopen(b"this is not json"))
+    assert boxdlist.fetch_movie_details("Amelie", "2001") is None
+
+
+def test_fetch_movie_details_json_that_is_not_a_dict_returns_none(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        fake_urlopen(b'["not", "a", "dict"]'))
+    assert boxdlist.fetch_movie_details("Amelie", "2001") is None
+
+
+def test_fetch_movie_details_network_error_returns_none(monkeypatch):
+    def no_internet(url, timeout=None):
+        raise OSError("no internet")
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", no_internet)
+    assert boxdlist.fetch_movie_details("Amelie", "2001") is None
+
+
+def test_fetch_movie_details_not_found_returns_none(monkeypatch):
+    # the proxy answers 404 when TMDB does not know the movie;
+    # urlopen raises HTTPError, which is a kind of OSError
+    def not_found(url, timeout=None):
+        raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", not_found)
+    assert boxdlist.fetch_movie_details("zzzxqwv", "") is None
+
+
+def test_fetch_movie_details_asks_the_proxy_with_name_and_year(monkeypatch):
+    seen = capture_urls(monkeypatch)
+    boxdlist.fetch_movie_details("Amelie", "2001")
+    assert len(seen) == 1
+    assert seen[0].startswith(boxdlist.DETAILS_API + "?")
+    assert "name=Amelie" in seen[0]
+    assert "year=2001" in seen[0]
+
+
+def test_fetch_movie_details_without_year_does_not_send_it(monkeypatch):
+    seen = capture_urls(monkeypatch)
+    boxdlist.fetch_movie_details("Amelie", "")
+    assert "year=" not in seen[0]
+
+
+def test_fetch_movie_details_encodes_accents(monkeypatch):
+    seen = capture_urls(monkeypatch)
+    boxdlist.fetch_movie_details("Amélie", "2001")
+    assert "Am%C3%A9lie" in seen[0]
+    assert "é" not in seen[0]
+
+
+def test_fetch_movie_details_encodes_ampersand_in_name(monkeypatch):
+    # a raw "&" would cut the name in half and "Jerry" would look like a new parameter
+    seen = capture_urls(monkeypatch)
+    boxdlist.fetch_movie_details("Tom & Jerry", "2021")
+    assert "name=Tom+%26+Jerry" in seen[0]
 
 # ---------- build script ----------
 def test_set_app_version_changes_only_that_line(tmp_path):
@@ -1573,3 +1659,419 @@ def test_import_without_duplicates_shows_no_warning(app, tmp_path, monkeypatch):
                         lambda *args, **kwargs: warnings.append(args))
     app.load_path(csv_file(tmp_path, [movie("A"), movie("B")]))
     assert warnings == []
+    
+# ---------- format_runtime ----------
+@pytest.mark.parametrize("minutes, expected", [
+    (122, "2h 02min"),    # hours and minutes, minutes get a leading zero
+    (120, "2h 00min"),    # exact hours
+    (60, "1h 00min"),     # exactly one hour
+    (45, "45min"),        # less than an hour: no "0h"
+    (1, "1min"),          # smallest valid value
+    (0, ""),              # TMDB sends 0 when it does not know
+    (-5, ""),             # negative makes no sense
+    (None, ""),           # TMDB sends null when it does not know
+    ("122", ""),          # text is not trusted
+    (122.0, ""),          # a float is not a whole number of minutes
+    (True, ""),           # True counts as 1 in Python, but it is not a duration
+])
+def test_format_runtime(minutes, expected):
+    assert format_runtime(minutes) == expected
+
+
+# ---------- details_line ----------
+@pytest.mark.parametrize("details, expected", [
+    ({"genres": ["Comedy", "Romance"], "runtime": 122},
+     "Comedy, Romance · 2h 02min"),            # everything is there
+    ({"genres": [], "runtime": 122}, "2h 02min"),          # no genres
+    ({"genres": ["Drama"], "runtime": None}, "Drama"),     # no runtime
+    ({"genres": ["Drama"], "runtime": 0}, "Drama"),        # runtime 0 counts as missing
+    ({"genres": [1, 2], "runtime": 60}, "1h 00min"),       # genres that are not text are ignored
+    ({"genres": ["Drama", 3], "runtime": 90},
+     "Drama · 1h 30min"),                      # only the text genres are kept
+    ({"genres": "Drama", "runtime": 90}, "1h 30min"),      # genres should be a list
+    ({"runtime": 45}, "45min"),                # genres key missing
+    ({"genres": ["Drama"]}, "Drama"),          # runtime key missing
+    ({}, ""),                                  # nothing at all
+])
+def test_details_line(details, expected):
+    assert details_line(details) == expected
+    
+# ---------- details panel ----------
+DETAILS = {"genres": ["Comedy"], "runtime": 122, "overview": "A story."}
+
+def fake_threads(monkeypatch):
+    # Replaces threading inside boxdlist, so on_select never starts a real
+    # thread. Returns the list of threads that would have been started.
+    started = []
+    class FakeThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self.target = target
+            self.args = args
+        def start(self):
+            started.append(self)
+    monkeypatch.setattr(boxdlist, "threading", SimpleNamespace(Thread=FakeThread))
+    return started
+
+def select_row(app, iid="0"):
+    app.table.selection_set(iid)
+    app.on_select()   # called directly, so the test does not wait for Tk events
+
+def panel_texts(app):
+    return (app.details_title.cget("text"),
+            app.details_meta.cget("text"),
+            app.details_overview.cget("text"))
+
+# ---------- show_details, show_message, clear_details ----------
+def test_show_details_fills_the_panel(app):
+    app.show_details(movie("Amélie", "2001"),
+                     {"genres": ["Comedy", "Romance"], "runtime": 122,
+                      "overview": "  A story.  "})
+    assert panel_texts(app) == ("Amélie (2001)",
+                                "Comedy, Romance · 2h 02min",
+                                "A story.")   # outer spaces are removed
+
+def test_show_details_without_year_has_no_parentheses(app):
+    app.show_details(movie("Amélie", year=""), DETAILS)
+    assert app.details_title.cget("text") == "Amélie"
+
+def test_show_details_without_details_shows_no_synopsis(app):
+    app.show_details(movie("Amélie", "2001"), None)
+    assert panel_texts(app) == ("Amélie (2001)", "", "No synopsis available.")
+
+@pytest.mark.parametrize("overview", ["", "   ", None, 123])
+def test_show_details_empty_or_invalid_synopsis(app, overview):
+    app.show_details(movie("Amélie"), {"genres": ["Comedy"], "overview": overview})
+    assert app.details_overview.cget("text") == "No synopsis available."
+
+def test_show_message_replaces_the_old_details(app):
+    app.show_details(movie("Amélie", "2001"), DETAILS)
+    app.show_message(movie("Blade Runner", "1982"), "Loading...")
+    # the genres of the old movie must not stay under the new title
+    assert panel_texts(app) == ("Blade Runner (1982)", "", "Loading...")
+
+def test_clear_details_empties_everything(app):
+    app.show_details(movie("Amélie", "2001"), DETAILS)
+    app.clear_details()
+    assert panel_texts(app) == ("", "", "")
+
+# ---------- on_select ----------
+def test_select_one_movie_shows_loading_and_starts_a_request(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    assert panel_texts(app) == ("Amélie (2001)", "", "Loading...")
+    assert app.details_target is app.visible[0]
+    assert len(started) == 1
+    assert started[0].target == app._details_worker
+    assert started[0].args[0] is app.visible[0]
+
+def test_select_a_cached_movie_skips_the_request(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(app.visible[0])] = DETAILS
+    select_row(app, "0")
+    assert panel_texts(app) == ("Amélie (2001)", "Comedy · 2h 02min", "A story.")
+    assert started == []   # no network needed
+
+def test_select_several_movies_empties_the_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app.table.selection_set("0", "1")
+    app.on_select()
+    assert app.details_target is None
+    assert panel_texts(app) == ("", "", "")
+
+def test_deselecting_empties_the_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app.clear_selection()
+    app.on_select()
+    assert app.details_target is None
+    assert panel_texts(app) == ("", "", "")
+
+def test_select_still_updates_the_counter(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    assert app.counter.cget("text") == "4 / 4 (1 selected)"
+
+# ---------- _on_details_result ----------
+def test_result_success_shows_details_and_caches_them(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], DETAILS)
+    assert panel_texts(app) == ("Amélie (2001)", "Comedy · 2h 02min", "A story.")
+    assert app.details_cache[boxdlist.movie_key(app.visible[0])] == DETAILS
+
+def test_result_failure_shows_a_message_and_is_not_cached(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], None)
+    assert panel_texts(app) == ("Amélie (2001)", "", "Could not load details.")
+    assert app.details_cache == {}   # a failure must be tried again next time
+
+def test_late_success_keeps_the_panel_but_is_cached(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "1")   # the user is now looking at Blade Runner
+    app._on_details_result(app.visible[0], DETAILS)   # Amélie answers late
+    assert panel_texts(app) == ("Blade Runner (1982)", "", "Loading...")
+    # the answer is not lost: selecting Amélie later is instant
+    assert boxdlist.movie_key(app.visible[0]) in app.details_cache
+
+def test_late_failure_does_not_touch_the_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "1")
+    app._on_details_result(app.visible[0], None)
+    assert panel_texts(app) == ("Blade Runner (1982)", "", "Loading...")
+    assert app.details_cache == {}
+
+def test_result_with_nothing_selected_keeps_the_panel_empty(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app.clear_selection()
+    app.on_select()   # the user deselected before the answer came
+    app._on_details_result(app.visible[0], DETAILS)
+    assert panel_texts(app) == ("", "", "")
+    assert boxdlist.movie_key(app.visible[0]) in app.details_cache
+
+# ---------- _details_worker ----------
+def test_details_worker_hands_the_result_to_the_main_thread(app, movies, monkeypatch):
+    asked = []
+    def fake_fetch(name, year):
+        asked.append((name, year))
+        return DETAILS
+    monkeypatch.setattr(boxdlist, "fetch_movie_details", fake_fetch)
+    scheduled = []
+    # capture after() instead of waiting for Tk to run it
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append((ms, func, args)))
+    app._details_worker(movies[0])
+    assert asked == [("Amélie", "2001")]
+    assert scheduled == [(0, app._on_details_result, (movies[0], DETAILS))]
+    
+# ---------- panel visibility ----------
+def test_panel_is_hidden_when_nothing_is_selected(app, movies):
+    app.set_movies(movies)
+    assert app.details.winfo_manager() == ""
+
+def test_selecting_one_movie_shows_the_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    assert app.details.winfo_manager() == "pack"
+
+def test_deselecting_hides_the_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app.clear_selection()
+    app.on_select()
+    assert app.details.winfo_manager() == ""
+
+def test_rebuilding_the_table_hides_the_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app.update_list()   # same as typing in the search box: the selection is lost
+    assert app.details.winfo_manager() == ""
+    assert app.details_target is None
+
+def test_panel_comes_back_on_the_right_of_the_scrollbar(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app.clear_selection()
+    app.on_select()
+    select_row(app, "1")
+    # pack order decides the position: panel, scrollbar, then the table
+    assert app.table.master.pack_slaves() == [app.details, app.scrollbar, app.table]
+    
+# ---------- plan_summary ----------
+@pytest.mark.parametrize("total, lines, expected", [
+    (2, 20, (True, 2)),     # plenty of space: all movies, with details
+    (2, 12, (True, 2)),     # exact fit (2 movies x 5 lines + 2 header lines)
+    (3, 17, (True, 3)),     # exact fit again
+    (10, 22, (True, 3)),    # only 3 fit with details, the rest is "+ N more"
+    (4, 17, (False, 4)),    # fewer than 3 would fit with details: names only
+    (2, 8, (False, 2)),     # small panel: names only
+    (10, 12, (False, 10)),  # names only, all of them fit
+    (30, 12, (False, 9)),   # names only, one line is kept for "+ N more"
+    (5, 1, (False, 0)),     # almost no space at all
+])
+def test_plan_summary(total, lines, expected):
+    assert boxdlist.plan_summary(total, lines) == expected
+
+
+# ---------- build_summary ----------
+def test_build_summary_names_only(movies):
+    lines = boxdlist.build_summary(movies[:3], 3, False, 30, {}, set())
+    assert lines == [("3 movies selected", "header"), ("", ""),
+                     ("Amélie (2001)", "title"),
+                     ("Blade Runner (1982)", "title"),
+                     ("Cidade de Deus (2002)", "title")]
+
+def test_build_summary_without_year_has_no_parentheses():
+    lines = boxdlist.build_summary([movie("Amélie", year="")], 1, False, 30, {}, set())
+    assert lines[2] == ("Amélie", "title")
+
+def test_build_summary_with_details(movies):
+    cache = {boxdlist.movie_key(movies[0]):
+             {"genres": ["Comedy"], "runtime": 122, "overview": "A story."}}
+    lines = boxdlist.build_summary(movies[:2], 2, True, 30, cache, set())
+    assert lines[2:7] == [("Amélie (2001)", "title"),
+                          ("Comedy · 2h 02min", "meta"),
+                          ("A story.", "overview"), ("", "overview"),
+                          ("", "")]
+    # the second movie has no details yet, but takes the same number of lines
+    assert lines[7:] == [("Blade Runner (1982)", "title"), ("", "meta"),
+                         ("", "overview"), ("", "overview"), ("", "")]
+
+def test_build_summary_shows_loading_for_movies_in_progress(movies):
+    loading = {boxdlist.movie_key(movies[0])}
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, {}, loading)
+    assert lines[3] == ("Loading...", "meta")
+
+def test_build_summary_adds_a_more_line(movies):
+    lines = boxdlist.build_summary(movies, 2, False, 30, {}, set())
+    assert lines[-1] == ("+ 2 more", "meta")
+    assert len([style for _, style in lines if style == "title"]) == 2
+
+def test_build_summary_cuts_a_long_synopsis_to_two_lines(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"overview": "word " * 40}}
+    lines = boxdlist.build_summary(movies[:1], 1, True, 20, cache, set())
+    overview = [text for text, style in lines if style == "overview"]
+    assert len(overview) == 2
+    assert overview[1].endswith("...")
+    assert all(len(text) <= 20 for text in overview)
+
+def test_build_summary_shortens_a_long_title():
+    long_movie = movie("The Extraordinarily Long Movie Title Of All Time", "2001")
+    lines = boxdlist.build_summary([long_movie], 1, False, 20, {}, set())
+    assert lines[2][0].endswith("...")
+    assert len(lines[2][0]) <= 20
+
+
+# ---------- several movies selected, in the interface ----------
+def set_space(app, monkeypatch, lines=40, width=30):
+    # the test window is hidden, so it has no real size: fake it
+    monkeypatch.setattr(app, "summary_capacity", lambda: lines)
+    monkeypatch.setattr(app, "summary_width", lambda: width)
+
+def summary_text(app):
+    return app.summary.get("1.0", "end")
+
+def select_two(app):
+    app.table.selection_set("0", "1")
+    app.on_select()
+
+def test_selecting_several_movies_keeps_the_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch)
+    app.set_movies(movies)
+    select_two(app)
+    assert app.details.winfo_manager() == "pack"
+
+def test_select_several_movies_shows_the_list(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch)
+    app.set_movies(movies)
+    select_two(app)
+    assert app.summary.winfo_manager() == "pack"
+    assert app.single_view.winfo_manager() == ""
+    assert app.summary_movies == [app.visible[0], app.visible[1]]
+    assert app.details_target is None
+    text = summary_text(app)
+    assert "2 movies selected" in text
+    assert "Amélie (2001)" in text
+    assert "Blade Runner (1982)" in text
+
+def test_list_follows_the_order_of_the_table(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch)
+    app.set_movies(movies)
+    app.table.selection_set("2", "0")   # selected in the "wrong" order
+    app.on_select()
+    assert app.summary_movies == [app.visible[0], app.visible[2]]
+
+def test_list_requests_details_once_per_movie(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40)
+    app.set_movies(movies)
+    select_two(app)
+    assert len(started) == 2
+    assert len(app.details_inflight) == 2
+    assert "Loading..." in summary_text(app)
+    app.render_summary()   # drawing again must not ask again
+    assert len(started) == 2
+
+def test_list_with_little_space_asks_for_nothing(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=6)   # names only
+    app.set_movies(movies)
+    select_two(app)
+    assert started == []
+    assert "Loading..." not in summary_text(app)
+    assert "Amélie (2001)" in summary_text(app)
+
+def test_list_skips_movies_that_are_already_cached(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40)
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(app.visible[0])] = DETAILS
+    select_two(app)
+    assert len(started) == 1   # only the second movie needs a request
+    assert "Comedy · 2h 02min" in summary_text(app)
+
+def test_answer_refreshes_the_list(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40)
+    app.set_movies(movies)
+    select_two(app)
+    app._on_details_result(app.visible[0], DETAILS)
+    assert "Comedy · 2h 02min" in summary_text(app)
+    assert boxdlist.movie_key(app.visible[0]) not in app.details_inflight
+
+def test_failed_details_are_not_asked_again_while_drawing(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40)
+    app.set_movies(movies)
+    select_two(app)
+    app._on_details_result(app.visible[0], None)
+    assert boxdlist.movie_key(app.visible[0]) in app.details_failed
+    assert len(started) == 2   # the failed movie was not requested again
+
+def test_a_new_selection_retries_failed_details(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40)
+    app.set_movies(movies)
+    select_two(app)
+    app._on_details_result(app.visible[0], None)
+    app.on_select()   # the selection changed (even to the same movies)
+    assert len(started) == 3
+
+def test_going_back_to_one_movie_shows_the_single_view(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch)
+    app.set_movies(movies)
+    select_two(app)
+    select_row(app, "0")
+    assert app.single_view.winfo_manager() == "pack"
+    assert app.summary.winfo_manager() == ""
+    assert app.summary_movies == []
+
+def test_deselecting_everything_hides_the_panel_and_the_list(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch)
+    app.set_movies(movies)
+    select_two(app)
+    app.clear_selection()
+    app.on_select()
+    assert app.details.winfo_manager() == ""
+    assert app.summary_movies == []

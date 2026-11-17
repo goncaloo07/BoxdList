@@ -16,11 +16,13 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk, font
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import urllib.request
+import urllib.parse
 import threading
 import tempfile
 import subprocess
 import ctypes
 from datetime import date, timedelta
+import textwrap
   
 def app_folder() -> Path:
     """Folder of the .exe when frozen, or of this file when running the code."""
@@ -40,15 +42,20 @@ NO_FILTER = "All"
 EMPTY = "—"            # shown in the table when data is missing
 VALID_YEAR = re.compile(r"\d{4}")
 VALID_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-DEFAULT_SIZE = "760x600"
+DETAILS_WIDTH = 260
+DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.0.15"
+APP_VERSION = "1.0.16"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
+DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
                   "Last 30 days": 30, "Last year": 365}
 MAX_OPEN_AT_ONCE = 5 # above this, ask before opening many pages
 DEFAULT_SORT_COLUMN = "date"   # sort used when nothing valid was saved
+SUMMARY_HEADER_LINES = 2   # "3 movies selected" and a blank line
+DETAIL_LINES = 5           # title, genres, 2 lines of synopsis, blank line
+MIN_DETAILED = 3           # fewer detailed movies than this: names only
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -248,6 +255,22 @@ def fetch_latest_release() -> dict | None:
     except (OSError, ValueError):
         return None
     
+def fetch_movie_details(name: str, year: str) -> dict | None:
+    """Asks the proxy for genres, runtime and synopsis. None if anything fails."""
+    params = {"name": name}
+    if year:
+        params["year"] = year   # some movies have no year
+    url = f"{DETAILS_API}?{urllib.parse.urlencode(params)}"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            text = response.read().decode("utf-8")
+        result = json.loads(text)
+        if not isinstance(result, dict):
+            return None
+        return result
+    except (OSError, ValueError):
+        return None
+    
 def find_installer_url(release: dict) -> str | None:
     """Returns the download link of BoxdListSetup.exe, or None if missing."""
     for release_asset in release.get("assets", []):
@@ -296,6 +319,79 @@ def count_duplicates(movies: list[dict]) -> int:
         else:
             seen.add(key)
     return count
+
+def format_runtime(minutes) -> str:
+    """122 -> '2h 02min', 45 -> '45min', missing or invalid -> ''."""
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+        return ""
+    hours, mins = divmod(minutes, 60)
+    if hours == 0:
+        return f"{mins}min"
+    return f"{hours}h {mins:02d}min"
+
+def details_line(details: dict) -> str:
+    """'Comedy, Romance · 2h 02min'. Leaves out whatever is missing."""
+    parts = []
+    genres = details.get("genres")
+    if isinstance(genres, list):
+        names = [g for g in genres if isinstance(g, str)]   # keep only real text
+        if names:
+            parts.append(", ".join(names))   # "Comedy, Romance"
+    runtime = format_runtime(details.get("runtime"))
+    if runtime:
+        parts.append(runtime)
+    return " · ".join(parts)
+
+def plan_summary(total: int, lines: int) -> tuple[bool, int]:
+    """Decides how the list of selected movies looks.
+    Returns (with_details, how_many_movies_to_show).
+    """
+    usable = lines - SUMMARY_HEADER_LINES
+    # every movie fits, with details
+    if total * DETAIL_LINES <= usable:
+        return True, total
+    # only some fit with details; one line is kept for "+ N more"
+    shown = (usable - 1) // DETAIL_LINES
+    if shown >= MIN_DETAILED:
+        return True, shown
+    # too little space for details: names only
+    if total <= usable:
+        return False, total
+    return False, max(usable - 1, 0)
+
+
+def build_summary(movies: list[dict], shown: int, with_details: bool,
+                  width: int, cache: dict, loading: set) -> list[tuple[str, str]]:
+    """Lines of the multi-selection list, as (text, style) pairs.
+    'width' is how many characters fit in one line. 'cache' holds the
+    details we already have and 'loading' the movies being requested.
+    """
+    lines = [(f"{len(movies)} movies selected", "header"), ("", "")]
+    for movie in movies[:shown]:
+        year = f" ({movie['year']})" if movie["year"] else ""
+        title = textwrap.shorten(movie["name"] + year, width, placeholder="...")
+        lines.append((title, "title"))
+        if not with_details:
+            continue
+        key = movie_key(movie)
+        details = cache.get(key)
+        if details:
+            meta = details_line(details)
+        elif key in loading:
+            meta = "Loading..."
+        else:
+            meta = ""
+        lines.append((textwrap.shorten(meta, width, placeholder="..."), "meta"))
+        overview = details.get("overview") if details else None
+        text = overview.strip() if isinstance(overview, str) else ""
+        wrapped = (textwrap.wrap(text, width, max_lines=2, placeholder="...")
+                   if text else [])
+        wrapped += [""] * (2 - len(wrapped))   # always 2 lines, so nothing jumps
+        lines += [(line, "overview") for line in wrapped]
+        lines.append(("", ""))
+    if shown < len(movies):
+        lines.append((f"+ {len(movies) - shown} more", "meta"))
+    return lines
 
 # ---------- Configuration (remember the last CSV) ----------
 def read_last_path() -> str | None:
@@ -418,7 +514,7 @@ class App(TkinterDnD.Tk):
             w, h = size.split("x")
             size = f"{self.px(int(w))}x{self.px(int(h))}"
         self.geometry(size)
-        self.minsize(self.px(700), self.px(400))
+        self.minsize(self.px(700 + DETAILS_WIDTH), self.px(400))
         self.set_icon()
         self.apply_theme()
 
@@ -431,6 +527,11 @@ class App(TkinterDnD.Tk):
         self._search_job = None          # pending after() ID (debounce)
         self.downloading = False   # True while the installer is being downloaded
         self.last_deleted: list[tuple[dict, int]] | None = None
+        self.details_cache: dict[tuple[str, str], dict] = {}   # movie_key -> details that worked
+        self.details_target: dict | None = None   # the movie the panel is waiting for
+        self.summary_movies: list[dict] = []   # the selected movies, when there are several
+        self.details_inflight: set[tuple[str, str]] = set()   # requests in progress
+        self.details_failed: set[tuple[str, str]] = set()     # requests that failed
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # ---------- Header: logo and app name ----------
@@ -532,15 +633,48 @@ class App(TkinterDnD.Tk):
         self.table.tag_configure("even", background=SURFACE)
         self.table.tag_configure("odd", background=ROW_ALT)
 
-        scrollbar = ttk.Scrollbar(middle, orient="vertical",
-                                  command=self.table.yview)
-        self.table.configure(yscrollcommand=scrollbar.set)
+        self.scrollbar = ttk.Scrollbar(middle, orient="vertical", command=self.table.yview)
+        self.table.configure(yscrollcommand=self.scrollbar.set)
+        
+        # ---------- Details panel (right of the table) ----------
+        panel_width = self.px(DETAILS_WIDTH)
+        self.details = ttk.Frame(middle, width=panel_width,
+                                 padding=(self.px(12), self.px(4), 0, 0))
+        self.details.pack_propagate(False)   # keep the fixed width
+        wrap = panel_width - self.px(12)     # text breaks lines to fit the panel
+
+        # One movie selected: title, genres and synopsis
+        self.single_view = ttk.Frame(self.details)
+        self.details_title = ttk.Label(self.single_view, text="", wraplength=wrap,
+                                       justify="left",
+                                       font=("Segoe UI", 11, "bold"))
+        self.details_title.pack(anchor="w")
+        self.details_meta = ttk.Label(self.single_view, text="", wraplength=wrap,
+                                      justify="left", foreground=MUTED)
+        self.details_meta.pack(anchor="w", pady=(self.px(2), 0))
+        self.details_overview = ttk.Label(self.single_view, text="", wraplength=wrap,
+                                          justify="left")
+        self.details_overview.pack(anchor="w", pady=(self.px(10), 0))
+
+        # Several movies selected: a list that adapts to the space it has.
+        # Every line is cut by hand (wrap="none"), so we know how many lines it uses.
+        self.summary_font = font.Font(family="Segoe UI", size=9)
+        self.summary = tk.Text(self.details, width=1, height=1, wrap="none",
+                               bg=BG, fg=TEXT, font=self.summary_font,
+                               bd=0, highlightthickness=0, padx=0, pady=0,
+                               cursor="arrow", state="disabled", takefocus=0)
+        self.summary.tag_configure("header", font=("Segoe UI", 11, "bold"))
+        self.summary.tag_configure("title", font=("Segoe UI", 9, "bold"))
+        self.summary.tag_configure("meta", foreground=MUTED)
+        self.summary.bind("<Button-1>", lambda _: "break")   # no focus, no selection
+        # a bigger or smaller window changes how much fits
+        self.summary.bind("<Configure>", lambda _: self.render_summary())
+        
+        self.scrollbar.pack(side="right", fill="y", padx=(self.px(4), 0))
         self.table.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y", padx=(self.px(4), 0))
 
         # Warning message overlay when there is nothing to display
         self.warning = ttk.Label(self.table, text="", foreground=MUTED)
-
         self.table.bind("<Double-1>", self.on_double_click)
 
         # ---------- Bottom Section ----------
@@ -586,7 +720,7 @@ class App(TkinterDnD.Tk):
         self.bind("<Escape>", lambda _: self.clear_selection())
         self.bind("<Control-BackSpace>", lambda _: self.clear_filters())
         
-        self.table.bind("<<TreeviewSelect>>", lambda _: self.update_counter())
+        self.table.bind("<<TreeviewSelect>>", lambda _: self.on_select())
 
         self.dark_title_bar()   # ask Windows for a dark title bar
         self.drop_target_register(DND_FILES)
@@ -863,6 +997,29 @@ class App(TkinterDnD.Tk):
         release = fetch_latest_release()
         # tkinter is not thread safe: hand the result to the main thread
         self.after(0, self._on_update_result, release)
+     
+    def _details_worker(self, movie: dict) -> None:
+        details = fetch_movie_details(movie["name"], movie["year"])   # slow part, runs in the background
+        # tkinter is not thread safe: hand the result to the main thread
+        self.after(0, self._on_details_result, movie, details)
+    
+    def _on_details_result(self, movie: dict, details: dict | None) -> None:
+        """Runs on the main thread when the proxy answered (or failed)."""
+        key = movie_key(movie)
+        self.details_inflight.discard(key)
+        if details:
+            self.details_cache[key] = details   # only successes are saved
+        else:
+            self.details_failed.add(key)   # so the list does not ask again and again
+        if self.summary_movies:
+            self.render_summary()   # several movies selected: refresh the list
+            return
+        if movie is not self.details_target:
+            return   # the user already picked something else
+        if details:
+            self.show_details(movie, details)
+        else:
+            self.show_message(movie, "Could not load details.")
     
     def _on_update_result(self, release: dict | None) -> None:
         if not release:
@@ -984,6 +1141,7 @@ class App(TkinterDnD.Tk):
         self.update_headers()
         self.update_warning()
         self.update_buttons()
+        self.on_select()
     
     def update_counter(self) -> None:
         """Shows 'visible / total' and, if any rows are selected, how many."""
@@ -1132,6 +1290,121 @@ class App(TkinterDnD.Tk):
         name = self.visible[int(sel[0])]["name"]
         self.clipboard_clear()          # empties the clipboard
         self.clipboard_append(name)   # puts the text in it
+        
+    def show_details(self, movie: dict, details: dict | None) -> None:
+        """Fills the panel. 'details' is None if the lookup failed."""
+        year = f" ({movie['year']})" if movie["year"] else ""
+        self.details_title.config(text=movie["name"] + year)
+        # details_line cannot take None, so decide first
+        self.details_meta.config(text=details_line(details) if details else "")
+        overview = details.get("overview") if details else None
+        if not isinstance(overview, str) or not overview.strip():
+            overview = "No synopsis available."
+        self.details_overview.config(text=overview.strip())
+        
+    def show_message(self, movie: dict, text: str) -> None:
+        """Shows the title and one line of text, like 'Loading...'."""
+        year = f" ({movie['year']})" if movie["year"] else ""
+        self.details_title.config(text=movie["name"] + year)
+        self.details_meta.config(text="")   # clear the old genres and runtime
+        self.details_overview.config(text=text)
+        
+    def on_select(self) -> None:
+        """Runs whenever the selection changes."""
+        self.update_counter()
+        self.details_failed.clear()   # a new selection may retry what failed
+        sel = self.table.selection()
+        if not sel:
+            self.details_target = None   # a late answer must not refill the panel
+            self.summary_movies = []
+            self.clear_details()
+            self.hide_panel()
+            return
+        self.show_panel()
+        if len(sel) > 1:
+            self.details_target = None
+            self.clear_details()   # the one-movie view is hidden, keep it empty
+            # sorted, so the list follows the order of the table
+            self.summary_movies = [self.visible[i]
+                                   for i in sorted(int(i) for i in sel)]
+            self.show_summary_view()
+            self.update_idletasks()   # the real size is only known after the layout
+            self.render_summary()
+            return
+        self.summary_movies = []
+        self.show_single_view()
+        movie = self.visible[int(sel[0])]
+        self.details_target = movie
+        cached = self.details_cache.get(movie_key(movie))
+        if cached:
+            self.show_details(movie, cached)   # no network needed
+            return
+        self.show_message(movie, "Loading...")
+        threading.Thread(target=self._details_worker, args=(movie,),
+                         daemon=True).start()
+
+    def clear_details(self) -> None:
+        """Empties the panel (nothing selected)."""
+        for label in (self.details_title, self.details_meta,
+                      self.details_overview):
+            label.config(text="")
+            
+    def show_panel(self) -> None:
+        """Shows the details panel on the right. The table gets narrower."""
+        if self.details.winfo_manager() != "pack":
+            # before the scrollbar, so the order stays: panel, scrollbar, table
+            self.details.pack(side="right", fill="y", before=self.scrollbar)
+
+    def hide_panel(self) -> None:
+        """Hides the details panel. The table covers the whole width again."""
+        self.details.pack_forget()
+        
+    def show_single_view(self) -> None:
+        """The panel shows one movie (title, genres, synopsis)."""
+        self.summary.pack_forget()
+        self.single_view.pack(fill="both", expand=True)
+
+    def show_summary_view(self) -> None:
+        """The panel shows the list of selected movies."""
+        self.single_view.pack_forget()
+        self.summary.pack(fill="both", expand=True)
+
+    def summary_capacity(self) -> int:
+        """How many lines of text fit in the panel."""
+        return max(1, self.summary.winfo_height() // self.summary_font.metrics("linespace"))
+
+    def summary_width(self) -> int:
+        """How many characters fit in one line of the panel."""
+        return max(10, self.summary.winfo_width() // self.summary_font.measure("0") - 1)
+
+    def request_missing_details(self, movies: list[dict]) -> None:
+        """Starts a request for each movie that has no details yet."""
+        for movie in movies:
+            key = movie_key(movie)
+            if (key in self.details_cache or key in self.details_inflight
+                    or key in self.details_failed):
+                continue   # known, already on its way, or failed a moment ago
+            self.details_inflight.add(key)
+            threading.Thread(target=self._details_worker, args=(movie,),
+                             daemon=True).start()
+
+    def render_summary(self) -> None:
+        """Draws the list of selected movies, as detailed as the space allows."""
+        if not self.summary_movies:
+            return
+        with_details, shown = plan_summary(len(self.summary_movies),
+                                           self.summary_capacity())
+        if with_details:
+            # only the movies that are shown need their details
+            self.request_missing_details(self.summary_movies[:shown])
+        lines = build_summary(self.summary_movies, shown, with_details,
+                              self.summary_width(), self.details_cache,
+                              self.details_inflight)
+        self.summary.config(state="normal")   # a disabled Text cannot be changed
+        self.summary.delete("1.0", "end")
+        for text, style in lines:
+            self.summary.insert("end", text + "\n", (style,) if style else ())
+        self.summary.config(state="disabled")
         
     def save_to_last_csv(self, movies: list[dict], error_title: str) -> bool:
         """Saves to the last imported CSV. Returns False if saving failed."""
