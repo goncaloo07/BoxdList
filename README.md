@@ -14,7 +14,9 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Filter by when you added the film (last 7 days, last 30 days or last year)
 - Remembers the window size, its position and the sort order
 - Random pick from the films currently shown, never repeating the previous one
-- See details about the movie by selecting it
+- Select a film to see its genres, runtime and synopsis (needs an internet connection)
+- Select several films (drag, `Ctrl+click` or `Shift+click`) to see a list that fits the available space: as many films as possible with their details, or just the names when there is little room
+- `Enter` and `Delete` work on all the selected films at once
 - Double-click a film (or press `Enter`) to open its Letterboxd page
 - Right-click a film to open its page, copy its name or delete it
 - Delete a film with the `Delete` key or the right-click menu (it asks first, and the film is also removed from your CSV file)
@@ -38,6 +40,12 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 | `Ctrl+Z` | Undo the last delete |
 | `Esc` | Deselect the film and leave the search box |
 | `Ctrl+Backspace` | Clear all filters |
+
+## Movie details
+
+When you select a film, BoxdList shows its genres, runtime and synopsis. The data comes from [TMDB](https://www.themoviedb.org/).
+
+The app does not talk to TMDB directly. It asks a small proxy ([boxdlist-proxy](https://github.com/goncaloo07/boxdlist-proxy)), which keeps the TMDB API key private. Only the title and the year of the film are sent. Without an internet connection the app works as before and the panel says the details could not be loaded.
 
 ## Getting your watchlist from Letterboxd
 
@@ -108,6 +116,8 @@ It asks if you want to push to GitHub, and then if you want to create a release.
 ## Disclaimer
 
 BoxdList is an independent project and is not affiliated with, endorsed by or connected to Letterboxd. Letterboxd is a trademark of its respective owner.
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 ## License
 
