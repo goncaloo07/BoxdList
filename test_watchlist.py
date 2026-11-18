@@ -300,14 +300,81 @@ def test_config_new_key_wins_over_old(tmp_path, monkeypatch):
     monkeypatch.setattr(boxdlist, "CONFIG_FILE", cfg)
     assert read_last_path() == "/tmp/new.csv"
     
+    # ---------- details cache on disk ----------
+def cache_file(tmp_path, monkeypatch, name="cache.json"):
+    # points the cache to a temp file, so the real one is never touched
+    path = tmp_path / name
+    monkeypatch.setattr(boxdlist, "DETAILS_CACHE_FILE", path)
+    return path
+
+@pytest.mark.parametrize("key, text", [
+    (("Amélie", "2001"), "Amélie|2001"),
+    (("No Year", ""), "No Year|"),           # movie without a year
+    (("A|B", "2000"), "A|B|2000"),           # "|" inside the name
+])
+def test_key_text_round_trip(key, text):
+    assert boxdlist.key_to_text(key) == text
+    assert boxdlist.text_to_key(text) == key
+
+def test_details_cache_save_and_read(tmp_path, monkeypatch):
+    cache_file(tmp_path, monkeypatch)
+    original = {("Amélie", "2001"): {"genres": ["Comedy"], "runtime": 122},
+                ("No Year", ""): {"overview": "A story."}}
+    boxdlist.write_details_cache(original)
+    assert boxdlist.read_details_cache() == original
+
+def test_details_cache_keeps_accents_readable(tmp_path, monkeypatch):
+    path = cache_file(tmp_path, monkeypatch)
+    boxdlist.write_details_cache({("Amélie", "2001"): {}})
+    # ensure_ascii=False, so the file has "Amélie" and not "Am\u00e9lie"
+    assert "Amélie" in path.read_text(encoding="utf-8")
+
+def test_details_cache_missing_returns_empty(tmp_path, monkeypatch):
+    cache_file(tmp_path, monkeypatch, "missing.json")
+    assert boxdlist.read_details_cache() == {}
+
+def test_details_cache_corrupted_returns_empty(tmp_path, monkeypatch):
+    path = cache_file(tmp_path, monkeypatch)
+    path.write_text("{this is not json", encoding="utf-8")
+    assert boxdlist.read_details_cache() == {}
+
+def test_details_cache_not_a_dict_returns_empty(tmp_path, monkeypatch):
+    path = cache_file(tmp_path, monkeypatch)
+    path.write_text('["not", "a", "dict"]', encoding="utf-8")
+    assert boxdlist.read_details_cache() == {}
+
+def test_details_cache_ignores_invalid_entries(tmp_path, monkeypatch):
+    path = cache_file(tmp_path, monkeypatch)
+    # first has no "|", second has details that are not a dict
+    path.write_text('{"no separator": {}, "A|2000": "text"}', encoding="utf-8")
+    assert boxdlist.read_details_cache() == {}
+
+def test_details_cache_keeps_valid_entries_next_to_invalid_ones(tmp_path, monkeypatch):
+    path = cache_file(tmp_path, monkeypatch)
+    path.write_text('{"bad": {}, "A|2000": {"runtime": 90}}', encoding="utf-8")
+    assert boxdlist.read_details_cache() == {("A", "2000"): {"runtime": 90}}
+
+def test_details_cache_save_in_missing_folder_creates_it(tmp_path, monkeypatch):
+    path = tmp_path / "missing_folder" / "cache.json"
+    monkeypatch.setattr(boxdlist, "DETAILS_CACHE_FILE", path)
+    boxdlist.write_details_cache({("A", "2000"): {}})   # should not raise an error
+    assert path.exists()
+
+def test_details_cache_save_error_does_not_crash(tmp_path, monkeypatch):
+    # the "file" is really a folder, so writing to it fails with an OSError
+    folder = tmp_path / "cache.json"
+    folder.mkdir()
+    monkeypatch.setattr(boxdlist, "DETAILS_CACHE_FILE", folder)
+    boxdlist.write_details_cache({("A", "2000"): {}})   # must be silent
+    
 # UI testing
 
 @pytest.fixture(scope="session")
 def _window():
-    # monkeypatch only works per test, so use its context manager here
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(boxdlist, "read_last_path", lambda: None)
         mp.setattr(boxdlist, "read_config", lambda: {})
+        mp.setattr(boxdlist, "read_details_cache", lambda: {})
         try:
             window = boxdlist.App()
         except tk.TclError as error:
@@ -320,6 +387,8 @@ def _window():
 def app(_window, monkeypatch):
     # UI tests must never call the real proxy
     monkeypatch.setattr(boxdlist, "fetch_movie_details", lambda name, year: None)
+    monkeypatch.setattr(boxdlist, "fetch_movie_details", lambda name, year: None)
+    monkeypatch.setattr(boxdlist, "write_details_cache", lambda cache: None)
     # Back to a clean state before each test
     _window.withdraw()
     _window.set_movies([])
@@ -514,6 +583,18 @@ def test_on_close_saves_settings(app, monkeypatch):
     assert saved["reverse_order"] is True
     assert saved["last_csv"] == "/tmp/w.csv"   # must still be there
     assert boxdlist.VALID_SIZE.fullmatch(saved["window_size"])
+    
+def test_on_close_saves_details_cache(app, monkeypatch):
+    saved = []
+    monkeypatch.setattr(boxdlist, "read_config", lambda: {})
+    monkeypatch.setattr(boxdlist, "write_config", lambda data: None)
+    # capture what would be written to the cache file
+    monkeypatch.setattr(boxdlist, "write_details_cache",
+                        lambda cache: saved.append(dict(cache)))
+    monkeypatch.setattr(app, "destroy", lambda: None)
+    app.details_cache[("Amélie", "2001")] = {"runtime": 122}
+    app.on_close()
+    assert saved == [{("Amélie", "2001"): {"runtime": 122}}]
     
 def test_save_movies_round_trip(tmp_path, movies):
     path = str(tmp_path / "out.csv")

@@ -46,7 +46,7 @@ DETAILS_WIDTH = 260
 DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.0.16"
+APP_VERSION = "1.0.17"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
@@ -56,6 +56,7 @@ DEFAULT_SORT_COLUMN = "date"   # sort used when nothing valid was saved
 SUMMARY_HEADER_LINES = 2   # "3 movies selected" and a blank line
 DETAIL_LINES = 5           # title, genres, 2 lines of synopsis, blank line
 MIN_DETAILED = 3           # fewer detailed movies than this: names only
+DETAILS_CACHE_FILE = app_folder() / "data" / "details_cache.json"
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -303,6 +304,15 @@ def movie_key(movie: dict) -> tuple[str, str]:
     """What identifies a movie: name + year."""
     return (movie["name"], movie["year"])
 
+def key_to_text(key: tuple[str, str]) -> str:
+    """('Amélie', '2001') -> 'Amélie|2001'. JSON keys must be text."""
+    return f"{key[0]}|{key[1]}"
+
+def text_to_key(text: str) -> tuple[str, str]:
+    """'Amélie|2001' -> ('Amélie', '2001')."""
+    name, year = text.rsplit("|", 1)  # rsplit, in case the name has a "|"
+    return (name, year)
+
 def count_new_movies(old: list[dict], new: list[dict]) -> int:
     """Counts movies in 'new' that were not in 'old'."""
     known = {movie_key(m) for m in old}   # a set makes the lookup fast
@@ -413,12 +423,35 @@ def read_config() -> dict:
     except (OSError, ValueError):
         return {}
     
+def read_details_cache() -> dict:
+    """Returns the saved details, or an empty dict if there is a problem."""
+    try:
+        data = json.loads(DETAILS_CACHE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    cache = {}
+    for text, details in data.items():
+        # skip anything that looks wrong instead of crashing
+        if "|" in text and isinstance(details, dict):
+            cache[text_to_key(text)] = details
+    return cache
+
+def write_details_cache(cache: dict) -> None:
+    """Saves the details to disk. Not critical, so errors are ignored."""
+    data = {key_to_text(k): v for k, v in cache.items()}
+    try:
+        DETAILS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DETAILS_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # the app still works without the cache
+
 def write_config(data: dict) -> None:
     """Saves all settings to the config file."""
     try:
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(
-            json.dumps(data), encoding="utf-8")
+        CONFIG_FILE.write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         pass  # not critical: the app still works fine
     
@@ -527,7 +560,7 @@ class App(TkinterDnD.Tk):
         self._search_job = None          # pending after() ID (debounce)
         self.downloading = False   # True while the installer is being downloaded
         self.last_deleted: list[tuple[dict, int]] | None = None
-        self.details_cache: dict[tuple[str, str], dict] = {}   # movie_key -> details that worked
+        self.details_cache: dict[tuple[str, str], dict] = read_details_cache()   # movie_key -> details that worked
         self.details_target: dict | None = None   # the movie the panel is waiting for
         self.summary_movies: list[dict] = []   # the selected movies, when there are several
         self.details_inflight: set[tuple[str, str]] = set()   # requests in progress
@@ -1506,6 +1539,7 @@ class App(TkinterDnD.Tk):
         data["window_size"] = (f"{self.winfo_width()}x{self.winfo_height()}"
                                f"+{self.winfo_x()}+{self.winfo_y()}")
         write_config(data)
+        write_details_cache(self.details_cache)
         self.destroy()
 
 
