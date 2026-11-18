@@ -4,7 +4,7 @@ A desktop app to browse, search, filter and randomly pick from your Letterboxd w
 
 Import the CSV exported from Letterboxd and see your whole watchlist in one table. Can't decide what to watch? Let it pick one for you.
 
-<img src="assets/screenshot.png" alt="BoxdList screenshot" width="400">
+<img src="assets/screenshot.png" alt="BoxdList screenshot" height="450">
 
 ## Features
 
