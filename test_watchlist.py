@@ -11,6 +11,7 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
 import build
 from datetime import date, timedelta
 import urllib.error
+import io
 
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
@@ -383,12 +384,25 @@ def _window():
     yield window
     window.destroy()
     
+class FakeExecutor:
+    """Pretends to be ThreadPoolExecutor. It only records what it was asked."""
+    def __init__(self):
+        self.submitted = []        # (function, args) of every submit
+        self.shutdown_calls = []   # arguments of every shutdown
+    def submit(self, func, *args):
+        self.submitted.append((func, args))
+    def shutdown(self, **kwargs):
+        self.shutdown_calls.append(kwargs)
+    
 @pytest.fixture
 def app(_window, monkeypatch):
     # UI tests must never call the real proxy
     monkeypatch.setattr(boxdlist, "fetch_movie_details", lambda name, year: None)
     monkeypatch.setattr(boxdlist, "fetch_movie_details", lambda name, year: None)
     monkeypatch.setattr(boxdlist, "write_details_cache", lambda cache: None)
+    monkeypatch.setattr(_window, "executor", FakeExecutor())
+    _window.prefetch_total = 0
+    _window.prefetch_done = 0
     # Back to a clean state before each test
     _window.withdraw()
     _window.set_movies([])
@@ -1147,7 +1161,7 @@ def test_show_status_clears_itself(app, monkeypatch):
     app._status_job = None
     app.show_status("hello")
     assert app.status.cget("text") == "hello"
-    assert scheduled[0][0] == 4000
+    assert scheduled[0][0] == 3000
     scheduled[0][1]()   # run the clear function
     assert app.status.cget("text") == ""
 # ---------- count decades ----------
@@ -2156,3 +2170,288 @@ def test_deselecting_everything_hides_the_panel_and_the_list(app, movies, monkey
     app.on_select()
     assert app.details.winfo_manager() == ""
     assert app.summary_movies == []
+
+# ---------- movies_to_fetch ----------
+def test_movies_to_fetch_skips_movies_in_the_cache(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"runtime": 90}}
+    result = boxdlist.movies_to_fetch(movies, cache, set())
+    assert names(result) == ["Blade Runner", "Cidade de Deus", "No Year"]
+
+def test_movies_to_fetch_skips_movies_already_on_their_way(movies):
+    skip = {boxdlist.movie_key(movies[1])}
+    result = boxdlist.movies_to_fetch(movies, {}, skip)
+    assert "Blade Runner" not in names(result)
+    assert len(result) == 3
+
+def test_movies_to_fetch_returns_duplicates_only_once():
+    first, second = movie("Same"), movie("Same")
+    result = boxdlist.movies_to_fetch([first, second], {}, set())
+    assert len(result) == 1
+    assert result[0] is first   # the first copy is the one kept
+
+def test_movies_to_fetch_keeps_remakes():
+    # same name, different year: they are different movies
+    items = [movie("A", "2000"), movie("A", "2001")]
+    assert len(boxdlist.movies_to_fetch(items, {}, set())) == 2
+
+def test_movies_to_fetch_does_not_change_its_inputs(movies):
+    cache = {boxdlist.movie_key(movies[0]): {}}
+    skip = {boxdlist.movie_key(movies[1])}
+    original = list(movies)
+    boxdlist.movies_to_fetch(movies, cache, skip)
+    assert movies == original
+    assert len(cache) == 1
+    assert len(skip) == 1
+
+def test_movies_to_fetch_with_no_movies():
+    assert boxdlist.movies_to_fetch([], {}, set()) == []
+
+def http_error(code, body=b""):
+    # urlopen raises HTTPError, which is a kind of OSError
+    return urllib.error.HTTPError("https://x", code, "msg", None, io.BytesIO(body))
+
+def raises(error):
+    # Fake urlopen that always fails with 'error'
+    def fake(url, timeout=None):
+        raise error
+    return fake
+
+def test_fetch_movie_details_not_found_returns_the_marker(monkeypatch):
+    error = http_error(404, b'{"error": "Not found"}')
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", raises(error))
+    result = boxdlist.fetch_movie_details("zzzxqwv", "")
+    assert result == boxdlist.NOT_FOUND
+
+def test_fetch_movie_details_not_found_is_a_copy(monkeypatch):
+    error = http_error(404, b'{"error": "Not found"}')
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", raises(error))
+    result = boxdlist.fetch_movie_details("zzzxqwv", "")
+    result["extra"] = 1   # changing the result must not change the constant
+    assert boxdlist.NOT_FOUND == {"not_found": True}
+
+def test_fetch_movie_details_wrong_address_is_not_marked(monkeypatch):
+    # Vercel answers a wrong address with its own 404 page
+    error = http_error(404, b"<html>The page could not be found</html>")
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", raises(error))
+    assert boxdlist.fetch_movie_details("Amelie", "2001") is None
+
+def test_fetch_movie_details_404_without_body_returns_none(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        raises(http_error(404)))
+    assert boxdlist.fetch_movie_details("Amelie", "2001") is None
+
+@pytest.mark.parametrize("code", [400, 500, 502])
+def test_fetch_movie_details_other_http_errors_are_not_marked(monkeypatch, code):
+    # even with the same body, only a 404 means "not found"
+    error = http_error(code, b'{"error": "Not found"}')
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", raises(error))
+    assert boxdlist.fetch_movie_details("Amelie", "2001") is None
+
+@pytest.mark.parametrize("value, expected", [
+    ({"not_found": True}, True),
+    ({"not_found": False}, False),
+    ({"not_found": 1}, False),        # only a real True counts
+    ({"genres": ["Comedy"]}, False),
+    ({}, False),
+    (None, False),
+    ("text", False),
+])
+def test_is_not_found(value, expected):
+    assert boxdlist.is_not_found(value) is expected
+
+def test_details_cache_keeps_the_not_found_marker(tmp_path, monkeypatch):
+    cache_file(tmp_path, monkeypatch)
+    original = {("Ghost", "2020"): dict(boxdlist.NOT_FOUND)}
+    boxdlist.write_details_cache(original)
+    assert boxdlist.read_details_cache() == original
+
+def test_not_found_is_cached_and_not_marked_as_failed(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    key = boxdlist.movie_key(app.visible[0])
+    app._on_details_result(app.visible[0], dict(boxdlist.NOT_FOUND))
+    assert key in app.details_cache
+    assert key not in app.details_failed
+    assert panel_texts(app) == ("Amélie (2001)", "",
+                                "No details found for this movie.")
+
+def test_select_a_not_found_movie_skips_the_request(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(app.visible[0])] = dict(boxdlist.NOT_FOUND)
+    select_row(app, "0")
+    assert started == []   # no network needed
+    assert panel_texts(app)[2] == "No details found for this movie."
+
+def test_prefetch_skips_movies_known_to_be_not_found(app, movies):
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(movies[0])] = dict(boxdlist.NOT_FOUND)
+    app.prefetch_details()
+    assert "Amélie" not in names(submitted_movies(app))
+    assert len(app.executor.submitted) == 3
+
+def test_build_summary_with_a_not_found_marker(movies):
+    cache = {boxdlist.movie_key(movies[0]): dict(boxdlist.NOT_FOUND)}
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set())
+    assert lines[3] == ("", "meta")   # no genres or runtime, and no crash
+
+# ---------- prefetch_details ----------
+def submitted_movies(app):
+    # the movie of every request that was sent to the executor
+    return [args[0] for _, args in app.executor.submitted]
+
+def test_prefetch_sends_one_request_per_movie(app, movies):
+    app.set_movies(movies)
+    app.prefetch_details()
+    assert names(submitted_movies(app)) == names(movies)
+    # every request goes to the background worker
+    assert all(func == app._prefetch_worker for func, _ in app.executor.submitted)
+
+def test_prefetch_skips_cached_movies(app, movies):
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(movies[0])] = DETAILS
+    app.prefetch_details()
+    assert "Amélie" not in names(submitted_movies(app))
+    assert len(app.executor.submitted) == 3
+
+def test_prefetch_skips_movies_already_on_their_way(app, movies):
+    app.set_movies(movies)
+    app.details_inflight.add(boxdlist.movie_key(movies[1]))
+    app.prefetch_details()
+    assert "Blade Runner" not in names(submitted_movies(app))
+
+def test_prefetch_marks_every_movie_as_on_its_way(app, movies):
+    app.set_movies(movies)
+    app.prefetch_details()
+    assert app.details_inflight == {boxdlist.movie_key(m) for m in movies}
+
+def test_prefetch_sets_the_counters(app, movies):
+    app.set_movies(movies)
+    app.prefetch_done = 5   # a leftover from an older round
+    app.prefetch_details()
+    assert app.prefetch_total == 4
+    assert app.prefetch_done == 0
+
+def test_prefetch_with_everything_cached_sends_nothing(app, movies):
+    app.set_movies(movies)
+    for m in movies:
+        app.details_cache[boxdlist.movie_key(m)] = DETAILS
+    app.prefetch_details()
+    assert app.executor.submitted == []
+    assert app.details_inflight == set()
+
+def test_prefetch_asks_once_for_duplicate_movies(app):
+    app.set_movies([movie("Same"), movie("Same")])
+    app.prefetch_details()
+    assert len(app.executor.submitted) == 1
+
+def test_prefetch_twice_does_not_repeat_requests(app, movies):
+    app.set_movies(movies)
+    app.prefetch_details()
+    app.prefetch_details()   # everything is already on its way
+    assert len(app.executor.submitted) == 4
+
+# ---------- _prefetch_worker ----------
+def test_prefetch_worker_hands_the_result_to_the_main_thread(app, movies, monkeypatch):
+    monkeypatch.setattr(boxdlist, "fetch_movie_details",
+                        lambda name, year: DETAILS)
+    scheduled = []
+    # capture after() instead of waiting for Tk to run it
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append((ms, func, args)))
+    app._prefetch_worker(movies[0])
+    assert scheduled == [(0, app._on_prefetch_result, (movies[0], DETAILS))]
+
+def test_prefetch_worker_passes_failures_on(app, movies, monkeypatch):
+    # the fixture already makes fetch_movie_details return None
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append(args))
+    app._prefetch_worker(movies[0])
+    assert scheduled == [(movies[0], None)]
+
+@pytest.mark.parametrize("error", [RuntimeError, tk.TclError])
+def test_prefetch_worker_ignores_a_closed_window(app, movies, monkeypatch, error):
+    def window_is_gone(*args, **kwargs):
+        raise error("window closed")
+    monkeypatch.setattr(app, "after", window_is_gone)
+    app._prefetch_worker(movies[0])   # must not raise
+
+# ---------- _on_prefetch_result ----------
+def test_prefetch_result_stores_the_details(app, movies):
+    app.prefetch_total = 2
+    app._on_prefetch_result(movies[0], DETAILS)
+    assert app.details_cache[boxdlist.movie_key(movies[0])] == DETAILS
+
+def test_prefetch_result_takes_the_movie_off_the_waiting_list(app, movies):
+    key = boxdlist.movie_key(movies[0])
+    app.details_inflight.add(key)
+    app.prefetch_total = 2
+    app._on_prefetch_result(movies[0], DETAILS)
+    assert key not in app.details_inflight
+
+def test_prefetch_result_shows_the_progress(app, movies):
+    app.prefetch_total = 3
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], DETAILS)
+    assert app.prefetch_done == 1
+    assert app.status.cget("text") == "Details 1/3"
+
+def test_prefetch_last_result_shows_ready(app, movies):
+    app.prefetch_total = 2
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], DETAILS)
+    app._on_prefetch_result(movies[1], DETAILS)
+    assert app.status.cget("text") == "Details ready"
+
+def test_prefetch_failed_result_still_counts(app, movies):
+    app.prefetch_total = 2
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], None)
+    assert app.prefetch_done == 1
+    assert app.status.cget("text") == "Details 1/2"
+    assert app.details_cache == {}   # a failure is not saved
+    assert boxdlist.movie_key(movies[0]) in app.details_failed
+
+def test_prefetch_result_past_the_total_still_shows_ready(app, movies):
+    # a late answer from an older round can push the count over the total
+    app.prefetch_total = 1
+    app.prefetch_done = 1
+    app._on_prefetch_result(movies[0], DETAILS)
+    assert app.prefetch_done == 2
+    assert app.status.cget("text") == "Details ready"
+
+# ---------- prefetch is started by the imports ----------
+def test_load_path_starts_the_prefetch(app, movies, tmp_path, monkeypatch):
+    quiet_import(monkeypatch)
+    app.load_path(csv_file(tmp_path, movies))
+    assert len(app.executor.submitted) == 4
+
+def test_load_path_with_an_invalid_csv_starts_no_prefetch(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(boxdlist.messagebox, "showerror",
+                        lambda *args, **kwargs: None)
+    bad = tmp_path / "bad.csv"
+    bad.write_text("Foo,Bar\n1,2\n", encoding="utf-8")   # wrong columns
+    app.load_path(bad.as_posix())
+    assert app.executor.submitted == []
+
+def test_load_last_csv_starts_the_prefetch(app, movies, tmp_path, monkeypatch):
+    path = csv_file(tmp_path, movies)
+    monkeypatch.setattr(boxdlist, "read_last_path", lambda: path)
+    app.load_last_csv()
+    assert len(app.executor.submitted) == 4
+
+def test_load_last_csv_without_a_file_starts_no_prefetch(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(boxdlist, "read_last_path",
+                        lambda: str(tmp_path / "missing.csv"))
+    app.load_last_csv()
+    assert app.executor.submitted == []
+
+# ---------- closing the app ----------
+def test_on_close_drops_the_queued_requests(app, monkeypatch):
+    monkeypatch.setattr(boxdlist, "read_config", lambda: {})
+    monkeypatch.setattr(boxdlist, "write_config", lambda data: None)
+    monkeypatch.setattr(app, "destroy", lambda: None)
+    app.on_close()
+    assert app.executor.shutdown_calls == [{"wait": False, "cancel_futures": True}]

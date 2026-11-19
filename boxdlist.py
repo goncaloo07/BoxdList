@@ -17,12 +17,14 @@ from tkinter import filedialog, messagebox, ttk, font
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import urllib.request
 import urllib.parse
+import urllib.error
 import threading
 import tempfile
 import subprocess
 import ctypes
 from datetime import date, timedelta
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
   
 def app_folder() -> Path:
     """Folder of the .exe when frozen, or of this file when running the code."""
@@ -46,7 +48,7 @@ DETAILS_WIDTH = 260
 DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.0.17"
+APP_VERSION = "1.0.18"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
@@ -57,6 +59,8 @@ SUMMARY_HEADER_LINES = 2   # "3 movies selected" and a blank line
 DETAIL_LINES = 5           # title, genres, 2 lines of synopsis, blank line
 MIN_DETAILED = 3           # fewer detailed movies than this: names only
 DETAILS_CACHE_FILE = app_folder() / "data" / "details_cache.json"
+DETAILS_WORKERS = 12
+NOT_FOUND = {"not_found": True}
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -256,8 +260,23 @@ def fetch_latest_release() -> dict | None:
     except (OSError, ValueError):
         return None
     
+def is_not_found(details) -> bool:
+    """True if 'details' is the marker for a movie that TMDB does not know."""
+    return isinstance(details, dict) and details.get("not_found") is True
+
+def is_proxy_not_found(error: urllib.error.HTTPError) -> bool:
+    """True only if our proxy said 404, not a wrong address (Vercel has its own 404)."""
+    try:
+        body = json.loads(error.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(body, dict) and body.get("error") == "Not found"
+    
 def fetch_movie_details(name: str, year: str) -> dict | None:
-    """Asks the proxy for genres, runtime and synopsis. None if anything fails."""
+    """Asks the proxy for genres, runtime and synopsis.
+    Returns a copy of NOT_FOUND if TMDB does not know the movie,
+    and None if anything else fails (so it can be tried again later).
+    """
     params = {"name": name}
     if year:
         params["year"] = year   # some movies have no year
@@ -269,6 +288,11 @@ def fetch_movie_details(name: str, year: str) -> dict | None:
         if not isinstance(result, dict):
             return None
         return result
+    except urllib.error.HTTPError as error:
+        # HTTPError is a kind of OSError, so it must come first
+        if error.code == 404 and is_proxy_not_found(error):
+            return dict(NOT_FOUND)   # a copy, so nobody changes the constant
+        return None
     except (OSError, ValueError):
         return None
     
@@ -329,6 +353,19 @@ def count_duplicates(movies: list[dict]) -> int:
         else:
             seen.add(key)
     return count
+
+def movies_to_fetch(movies: list[dict], cache: dict, skip: set) -> list[dict]:
+    """Movies that still need details, one per name+year."""
+    seen = set()
+    result = []
+    for m in movies:
+        key = movie_key(m)
+        # already known, already on its way, or already in this list
+        if key in cache or key in skip or key in seen:
+            continue
+        seen.add(key)
+        result.append(m)
+    return result
 
 def format_runtime(minutes) -> str:
     """122 -> '2h 02min', 45 -> '45min', missing or invalid -> ''."""
@@ -566,6 +603,9 @@ class App(TkinterDnD.Tk):
         self.details_inflight: set[tuple[str, str]] = set()   # requests in progress
         self.details_failed: set[tuple[str, str]] = set()     # requests that failed
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.executor = ThreadPoolExecutor(max_workers=DETAILS_WORKERS)
+        self.prefetch_total = 0   # how many movies this round has to fetch
+        self.prefetch_done = 0    # how many already answered
         
         # ---------- Header: logo and app name ----------
         header = ttk.Frame(self, padding=(self.px(12), self.px(10), self.px(12), 0))
@@ -936,6 +976,7 @@ class App(TkinterDnD.Tk):
         if path and Path(path).is_file():
             try:
                 self.set_movies(load_movies(path)[0])
+                self.prefetch_details()
             except (OSError, ValueError, UnicodeDecodeError, csv.Error):
                 pass  # file changed or became invalid: starts empty
 
@@ -958,6 +999,7 @@ class App(TkinterDnD.Tk):
         previous = self.movies
         save_last_path(path)
         self.set_movies(movies)
+        self.prefetch_details()
         
         incomplete = sum(is_incomplete(f) for f in movies)
         duplicates = count_duplicates(movies)
@@ -994,7 +1036,7 @@ class App(TkinterDnD.Tk):
         if self._status_job is not None:
             self.after_cancel(self._status_job)
         self.status.config(text=text)
-        self._status_job = self.after(4000, lambda: self.status.config(text="")) 
+        self._status_job = self.after(3000, lambda: self.status.config(text="")) 
         
     def update_decades(self) -> None:
         """Refreshes the decade dropdown with the decades that exist in the list."""
@@ -1331,8 +1373,11 @@ class App(TkinterDnD.Tk):
         # details_line cannot take None, so decide first
         self.details_meta.config(text=details_line(details) if details else "")
         overview = details.get("overview") if details else None
-        if not isinstance(overview, str) or not overview.strip():
+        if is_not_found(details):
+            overview = "No details found for this movie."
+        elif not isinstance(overview, str) or not overview.strip():
             overview = "No synopsis available."
+        self.details_overview.config(text=overview.strip())
         self.details_overview.config(text=overview.strip())
         
     def show_message(self, movie: dict, text: str) -> None:
@@ -1420,6 +1465,34 @@ class App(TkinterDnD.Tk):
             self.details_inflight.add(key)
             threading.Thread(target=self._details_worker, args=(movie,),
                              daemon=True).start()
+            
+    def prefetch_details(self) -> None:
+        """Fetches the details of every movie in the background."""
+        todo = movies_to_fetch(self.movies, self.details_cache, self.details_inflight)
+        if not todo:
+            return
+        for m in todo:
+            self.details_inflight.add(movie_key(m))
+            self.executor.submit(self._prefetch_worker, m)
+        self.prefetch_total = len(todo)
+        self.prefetch_done = 0
+        
+    def _prefetch_worker(self, movie: dict) -> None:
+        """Fetches one movie's details. Runs in a background thread."""
+        details = fetch_movie_details(movie["name"], movie["year"])
+        try:
+            self.after(0, self._on_prefetch_result, movie, details)
+        except (RuntimeError, tk.TclError):
+            pass
+        
+    def _on_prefetch_result(self, movie: dict, details: dict | None) -> None:
+        """Runs on the main thread when one prefetch request answered or failed."""
+        self._on_details_result(movie, details)
+        self.prefetch_done += 1
+        if self.prefetch_done >= self.prefetch_total:
+            self.show_status("Details ready")
+        else:
+            self.show_status(f"Details {self.prefetch_done}/{self.prefetch_total}")
 
     def render_summary(self) -> None:
         """Draws the list of selected movies, as detailed as the space allows."""
@@ -1540,6 +1613,7 @@ class App(TkinterDnD.Tk):
                                f"+{self.winfo_x()}+{self.winfo_y()}")
         write_config(data)
         write_details_cache(self.details_cache)
+        self.executor.shutdown(wait=False, cancel_futures=True)
         self.destroy()
 
 

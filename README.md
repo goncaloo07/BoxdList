@@ -14,7 +14,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Filter by when you added the film (last 7 days, last 30 days or last year)
 - Remembers the window size, its position and the sort order
 - Random pick from the films currently shown, never repeating the previous one
-- Select a film to see its genres, runtime and synopsis (needs an internet connection)
+- Select a film to see its genres, runtime and synopsis. After you import, the details are fetched in the background and saved on your computer, so they load instantly next time
 - Select several films (drag, `Ctrl+click` or `Shift+click`) to see a list that fits the available space: as many films as possible with their details, or just the names when there is little room
 - `Enter` and `Delete` work on all the selected films at once
 - Double-click a film (or press `Enter`) to open its Letterboxd page
@@ -45,7 +45,11 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 
 When you select a film, BoxdList shows its genres, runtime and synopsis. The data comes from [TMDB](https://www.themoviedb.org/).
 
-The app does not talk to TMDB directly. It asks a small proxy ([boxdlist-proxy](https://github.com/goncaloo07/boxdlist-proxy)), which keeps the TMDB API key private. Only the title and the year of the film are sent. Without an internet connection the app works as before and the panel says the details could not be loaded.
+After you import a CSV, the app fetches the details of every film in the background and shows the progress at the top right. The details are saved in `data/details_cache.json` next to the app, so the next time they load without internet and only new films are fetched. Films that TMDB does not know are saved too, so they are not asked again. To start over, close the app and delete that file.
+
+Letterboxd also lists TV series. For those, BoxdList shows the genres and the synopsis, but no runtime. Some entries may show "No details found", for example episodes or titles that TMDB lists with a different year.
+
+The app does not talk to TMDB directly. It asks a small proxy ([boxdlist-proxy](https://github.com/goncaloo07/boxdlist-proxy)), which keeps the TMDB API key private. Only the title and the year of the film are sent. Without an internet connection the app works as before: the details already saved are shown, and the panel says the others could not be loaded.
 
 ## Getting your watchlist from Letterboxd
 
