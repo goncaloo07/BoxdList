@@ -7,12 +7,14 @@ from boxdlist import (filter_movies, is_incomplete, load_movies, normalize,
                       sort_movies, year_as_int, year_range_error, valid_window_size, valid_sort_column,
                       valid_reverse_order, save_movies, is_newer, find_installer_url, fetch_latest_release, download_file, remove_movies,
                       count_new_movies, count_movies_by_decade, fit_on_screen, filter_recent, insert_movie, filter_complete,
-                      initial_sort, count_duplicates, format_runtime, details_line)
+                      initial_sort, count_duplicates, format_runtime, details_line, read_ratings)
 import build
 from datetime import date, timedelta
 import urllib.error
 import io
-
+import gzip
+import json
+from pathlib import Path
 
 def movie(name, year="2000", date="2024-01-01", url="https://boxd.it/x"):
     # Small helper to build a movie dict with sensible defaults
@@ -376,6 +378,7 @@ def _window():
         mp.setattr(boxdlist, "read_last_path", lambda: None)
         mp.setattr(boxdlist, "read_config", lambda: {})
         mp.setattr(boxdlist, "read_details_cache", lambda: {})
+        mp.setattr(boxdlist, "read_ratings_cache", lambda: ({}, None))
         try:
             window = boxdlist.App()
         except tk.TclError as error:
@@ -398,8 +401,10 @@ class FakeExecutor:
 def app(_window, monkeypatch):
     # UI tests must never call the real proxy
     monkeypatch.setattr(boxdlist, "fetch_movie_details", lambda name, year: None)
-    monkeypatch.setattr(boxdlist, "fetch_movie_details", lambda name, year: None)
     monkeypatch.setattr(boxdlist, "write_details_cache", lambda cache: None)
+    monkeypatch.setattr(boxdlist, "download_ratings", lambda: None)
+    monkeypatch.setattr(boxdlist, "read_downloaded_ratings", lambda path, wanted: None)
+    monkeypatch.setattr(boxdlist, "write_ratings_cache", lambda ratings, today: None)
     monkeypatch.setattr(_window, "executor", FakeExecutor())
     _window.prefetch_total = 0
     _window.prefetch_done = 0
@@ -413,6 +418,13 @@ def app(_window, monkeypatch):
     _window.details_inflight.clear()
     _window.details_failed.clear()
     _window.summary_movies = []
+    _window.ratings = {}
+    _window.ratings_updated = None
+    _window.ratings_loading = False
+    _window.ratings_downloading = False
+    _window.ratings_file = None
+    _window.status.config(text="")
+    _window._status_job = None
     return _window
     
 def test_warning_when_no_csv(app):
@@ -774,14 +786,6 @@ def capture_urls(monkeypatch, body=b"{}"):
     monkeypatch.setattr(boxdlist.urllib.request, "urlopen", fake)
     return seen
 
-
-def test_fetch_movie_details_returns_the_data(monkeypatch):
-    body = b'{"genres": ["Comedy"], "runtime": 122, "overview": "A story."}'
-    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", fake_urlopen(body))
-    result = boxdlist.fetch_movie_details("Amelie", "2001")
-    assert result == {"genres": ["Comedy"], "runtime": 122, "overview": "A story."}
-
-
 def test_fetch_movie_details_invalid_json_returns_none(monkeypatch):
     monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
                         fake_urlopen(b"this is not json"))
@@ -792,7 +796,6 @@ def test_fetch_movie_details_json_that_is_not_a_dict_returns_none(monkeypatch):
     monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
                         fake_urlopen(b'["not", "a", "dict"]'))
     assert boxdlist.fetch_movie_details("Amelie", "2001") is None
-
 
 def test_fetch_movie_details_network_error_returns_none(monkeypatch):
     def no_internet(url, timeout=None):
@@ -1793,6 +1796,7 @@ def test_details_line(details, expected):
     
 # ---------- details panel ----------
 DETAILS = {"genres": ["Comedy"], "runtime": 122, "overview": "A story."}
+DETAILS_WITH_ID = {**DETAILS, "imdb_id": "tt0000001"}
 
 def fake_threads(monkeypatch):
     # Replaces threading inside boxdlist, so on_select never starts a real
@@ -1991,8 +1995,9 @@ def test_panel_comes_back_on_the_right_of_the_scrollbar(app, movies, monkeypatch
 # ---------- plan_summary ----------
 @pytest.mark.parametrize("total, lines, expected", [
     (2, 20, (True, 2)),     # plenty of space: all movies, with details
-    (2, 12, (True, 2)),     # exact fit (2 movies x 5 lines + 2 header lines)
-    (3, 17, (True, 3)),     # exact fit again
+    (2, 14, (True, 2)),     # exact fit (2 movies x 6 lines + 2 header lines)
+    (3, 20, (True, 3)),     # exact fit again
+    (3, 19, (False, 3)),    # one line short: names only
     (10, 22, (True, 3)),    # only 3 fit with details, the rest is "+ N more"
     (4, 17, (False, 4)),    # fewer than 3 would fit with details: names only
     (2, 8, (False, 2)),     # small panel: names only
@@ -2020,13 +2025,15 @@ def test_build_summary_with_details(movies):
     cache = {boxdlist.movie_key(movies[0]):
              {"genres": ["Comedy"], "runtime": 122, "overview": "A story."}}
     lines = boxdlist.build_summary(movies[:2], 2, True, 30, cache, set())
-    assert lines[2:7] == [("Amélie (2001)", "title"),
+    assert lines[2:8] == [("Amélie (2001)", "title"),
                           ("Comedy · 2h 02min", "meta"),
+                          ("", "meta"),   # no rating yet, but the line is kept
                           ("A story.", "overview"), ("", "overview"),
                           ("", "")]
     # the second movie has no details yet, but takes the same number of lines
-    assert lines[7:] == [("Blade Runner (1982)", "title"), ("", "meta"),
-                         ("", "overview"), ("", "overview"), ("", "")]
+    assert lines[8:] == [("Blade Runner (1982)", "title"), ("", "meta"),
+                         ("", "meta"), ("", "overview"), ("", "overview"),
+                         ("", "")]
 
 def test_build_summary_shows_loading_for_movies_in_progress(movies):
     loading = {boxdlist.movie_key(movies[0])}
@@ -2173,7 +2180,7 @@ def test_deselecting_everything_hides_the_panel_and_the_list(app, movies, monkey
 
 # ---------- movies_to_fetch ----------
 def test_movies_to_fetch_skips_movies_in_the_cache(movies):
-    cache = {boxdlist.movie_key(movies[0]): {"runtime": 90}}
+    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": "tt0000001"}}
     result = boxdlist.movies_to_fetch(movies, cache, set())
     assert names(result) == ["Blade Runner", "Cidade de Deus", "No Year"]
 
@@ -2295,6 +2302,7 @@ def test_build_summary_with_a_not_found_marker(movies):
     cache = {boxdlist.movie_key(movies[0]): dict(boxdlist.NOT_FOUND)}
     lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set())
     assert lines[3] == ("", "meta")   # no genres or runtime, and no crash
+    assert lines[4] == ("", "meta")   # and no rating either
 
 # ---------- prefetch_details ----------
 def submitted_movies(app):
@@ -2310,7 +2318,7 @@ def test_prefetch_sends_one_request_per_movie(app, movies):
 
 def test_prefetch_skips_cached_movies(app, movies):
     app.set_movies(movies)
-    app.details_cache[boxdlist.movie_key(movies[0])] = DETAILS
+    app.details_cache[boxdlist.movie_key(movies[0])] = DETAILS_WITH_ID
     app.prefetch_details()
     assert "Amélie" not in names(submitted_movies(app))
     assert len(app.executor.submitted) == 3
@@ -2336,7 +2344,7 @@ def test_prefetch_sets_the_counters(app, movies):
 def test_prefetch_with_everything_cached_sends_nothing(app, movies):
     app.set_movies(movies)
     for m in movies:
-        app.details_cache[boxdlist.movie_key(m)] = DETAILS
+        app.details_cache[boxdlist.movie_key(m)] = DETAILS_WITH_ID
     app.prefetch_details()
     assert app.executor.submitted == []
     assert app.details_inflight == set()
@@ -2455,3 +2463,960 @@ def test_on_close_drops_the_queued_requests(app, monkeypatch):
     monkeypatch.setattr(app, "destroy", lambda: None)
     app.on_close()
     assert app.executor.shutdown_calls == [{"wait": False, "cancel_futures": True}]
+    
+# ---------- read_ratings ----------
+def write_ratings(path, lines):
+    # Writes a tiny IMDb ratings file, with the header line first
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("tconst\taverageRating\tnumVotes\n")
+        f.write("\n".join(lines) + "\n")
+    return path
+
+def test_read_ratings_keeps_only_wanted_ids(tmp_path):
+    path = write_ratings(tmp_path / "r.tsv.gz", [
+        "tt0000001\t8.3\t790000",
+        "tt0000002\t6.1\t1200",
+        "tt0000003\t7.0\t50",
+    ])
+    result = boxdlist.read_ratings(path, {"tt0000001", "tt0000003"})
+    assert result == {"tt0000001": (8.3, 790000), "tt0000003": (7.0, 50)}
+
+def test_read_ratings_ignores_the_header(tmp_path):
+    path = write_ratings(tmp_path / "r.tsv.gz", ["tt0000001\t8.3\t790000"])
+    # "tconst" is the header text, so it must never show up as a result
+    assert boxdlist.read_ratings(path, {"tconst"}) == {}
+
+def test_read_ratings_skips_a_line_with_a_bad_number(tmp_path):
+    path = write_ratings(tmp_path / "r.tsv.gz", [
+        "tt0000001\tabc\t10",         # rating is not a number
+        "tt0000002\t6.1\t1200",
+    ])
+    result = boxdlist.read_ratings(path, {"tt0000001", "tt0000002"})
+    assert result == {"tt0000002": (6.1, 1200)}   # the good line still works
+
+def test_read_ratings_skips_a_line_with_missing_columns(tmp_path):
+    path = write_ratings(tmp_path / "r.tsv.gz", [
+        "tt0000001\t8.3",             # votes column is missing
+        "tt0000002\t6.1\t1200",
+    ])
+    result = boxdlist.read_ratings(path, {"tt0000001", "tt0000002"})
+    assert result == {"tt0000002": (6.1, 1200)}
+
+def test_read_ratings_with_nothing_wanted_returns_empty(tmp_path):
+    path = write_ratings(tmp_path / "r.tsv.gz", ["tt0000001\t8.3\t790000"])
+    assert boxdlist.read_ratings(path, set()) == {}
+
+def test_read_ratings_missing_file_raises_oserror(tmp_path):
+    # the caller decides what to do, like with the other network and file helpers
+    with pytest.raises(OSError):
+        boxdlist.read_ratings(tmp_path / "missing.tsv.gz", {"tt0000001"})
+        
+# ---------- download_ratings and read_downloaded_ratings ----------
+GOOD_GZ = gzip.compress(
+    b"tconst\taverageRating\tnumVotes\ntt0000001\t8.3\t790000\n")
+
+def fake_download(monkeypatch, tmp_path, content=None, ok=True):
+    # Points the temp folder to tmp_path and fakes the download.
+    # 'content' is what gets written to the file, 'ok' is what download_file returns.
+    monkeypatch.setattr(boxdlist.tempfile, "gettempdir", lambda: str(tmp_path))
+    def fake(url, target):
+        if content is not None:
+            target.write_bytes(content)
+        return ok
+    monkeypatch.setattr(boxdlist, "download_file", fake)
+    return tmp_path / "boxdlist_ratings.tsv.gz"
+
+def test_download_ratings_returns_the_path_of_the_file(tmp_path, monkeypatch):
+    target = fake_download(monkeypatch, tmp_path, GOOD_GZ)
+    assert boxdlist.download_ratings() == target
+    assert target.exists()
+
+def test_download_ratings_uses_the_imdb_address(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(boxdlist.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(boxdlist, "download_file",
+                        lambda url, target: seen.append(url) or True)
+    boxdlist.download_ratings()
+    assert seen == [boxdlist.RATINGS_URL]
+
+def test_download_ratings_failure_returns_none(tmp_path, monkeypatch):
+    fake_download(monkeypatch, tmp_path, ok=False)
+    assert boxdlist.download_ratings() is None
+
+def test_download_ratings_failure_deletes_the_partial_file(tmp_path, monkeypatch):
+    # the connection dropped halfway: a cut file stays behind and must be removed
+    target = fake_download(monkeypatch, tmp_path, GOOD_GZ[:10], ok=False)
+    boxdlist.download_ratings()
+    assert not target.exists()
+
+def downloaded_file(tmp_path, content):
+    # a file like the one download_ratings leaves in the temp folder
+    path = tmp_path / "boxdlist_ratings.tsv.gz"
+    path.write_bytes(content)
+    return path
+
+def test_read_downloaded_ratings_returns_the_wanted_ratings(tmp_path):
+    path = downloaded_file(tmp_path, GOOD_GZ)
+    result = boxdlist.read_downloaded_ratings(path, {"tt0000001"})
+    assert result == {"tt0000001": (8.3, 790000)}
+
+def test_read_downloaded_ratings_deletes_the_big_file(tmp_path):
+    path = downloaded_file(tmp_path, GOOD_GZ)
+    boxdlist.read_downloaded_ratings(path, {"tt0000001"})
+    assert not path.exists()
+
+def test_read_downloaded_ratings_cut_file_returns_none_and_deletes_it(tmp_path):
+    path = downloaded_file(tmp_path, GOOD_GZ[:-5])   # missing the end
+    assert boxdlist.read_downloaded_ratings(path, {"tt0000001"}) is None
+    assert not path.exists()
+
+def test_read_downloaded_ratings_file_that_is_not_a_gz_returns_none(tmp_path):
+    path = downloaded_file(tmp_path, b"this is not a gz file")
+    assert boxdlist.read_downloaded_ratings(path, {"tt0000001"}) is None
+    assert not path.exists()
+
+def test_read_downloaded_ratings_missing_file_returns_none(tmp_path):
+    assert boxdlist.read_downloaded_ratings(tmp_path / "missing.tsv.gz", {"tt1"}) is None
+    
+# ---------- ratings cache on disk ----------
+def ratings_cache_file(tmp_path, monkeypatch, name="ratings.json"):
+    # points the ratings cache to a temp file, so the real one is never touched
+    path = tmp_path / name
+    monkeypatch.setattr(boxdlist, "RATINGS_CACHE_FILE", path)
+    return path
+
+def test_ratings_cache_save_and_read(tmp_path, monkeypatch):
+    ratings_cache_file(tmp_path, monkeypatch)
+    original = {"tt0000001": (8.3, 790000), "tt0000002": (6.1, 1200)}
+    boxdlist.write_ratings_cache(original, date(2026, 11, 20))
+    # tuples become lists in JSON, so they must come back as tuples
+    assert boxdlist.read_ratings_cache() == (original, date(2026, 11, 20))
+
+def test_ratings_cache_file_has_the_agreed_format(tmp_path, monkeypatch):
+    path = ratings_cache_file(tmp_path, monkeypatch)
+    boxdlist.write_ratings_cache({"tt0000001": (8.3, 790000)}, date(2026, 11, 20))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data == {"updated": "2026-11-20", "ratings": {"tt0000001": [8.3, 790000]}}
+
+def test_ratings_cache_missing_returns_empty(tmp_path, monkeypatch):
+    ratings_cache_file(tmp_path, monkeypatch, "missing.json")
+    assert boxdlist.read_ratings_cache() == ({}, None)
+
+def test_ratings_cache_corrupted_returns_empty(tmp_path, monkeypatch):
+    path = ratings_cache_file(tmp_path, monkeypatch)
+    path.write_text("{this is not json", encoding="utf-8")
+    assert boxdlist.read_ratings_cache() == ({}, None)
+
+def test_ratings_cache_not_a_dict_returns_empty(tmp_path, monkeypatch):
+    path = ratings_cache_file(tmp_path, monkeypatch)
+    path.write_text('["not", "a", "dict"]', encoding="utf-8")
+    assert boxdlist.read_ratings_cache() == ({}, None)
+
+@pytest.mark.parametrize("updated", ['"banana"', "null", "5"])
+def test_ratings_cache_invalid_date_keeps_the_ratings(tmp_path, monkeypatch, updated):
+    path = ratings_cache_file(tmp_path, monkeypatch)
+    path.write_text('{"updated": ' + updated + ', "ratings": {"tt1": [8.3, 10]}}',
+                    encoding="utf-8")
+    # a bad date must not throw away good ratings
+    assert boxdlist.read_ratings_cache() == ({"tt1": (8.3, 10)}, None)
+
+def test_ratings_cache_without_date_keeps_the_ratings(tmp_path, monkeypatch):
+    path = ratings_cache_file(tmp_path, monkeypatch)
+    path.write_text('{"ratings": {"tt1": [8.3, 10]}}', encoding="utf-8")
+    assert boxdlist.read_ratings_cache() == ({"tt1": (8.3, 10)}, None)
+
+def test_ratings_cache_ratings_not_a_dict_keeps_the_date(tmp_path, monkeypatch):
+    path = ratings_cache_file(tmp_path, monkeypatch)
+    path.write_text('{"updated": "2026-11-20", "ratings": [1, 2]}', encoding="utf-8")
+    assert boxdlist.read_ratings_cache() == ({}, date(2026, 11, 20))
+
+def test_ratings_cache_skips_invalid_entries(tmp_path, monkeypatch):
+    path = ratings_cache_file(tmp_path, monkeypatch)
+    path.write_text(
+        '{"updated": "2026-11-20", "ratings": {'
+        '"text": "8.3", '          # not a list
+        '"short": [8.3], '         # only one value
+        '"long": [8.3, 10, 5], '   # three values
+        '"bool_rating": [true, 5], '
+        '"bool_votes": [8.3, true], '
+        '"text_rating": ["8.3", 10], '
+        '"float_votes": [8.3, 10.5], '
+        '"ok": [7, 50]}}',         # an int rating is fine
+        encoding="utf-8")
+    assert boxdlist.read_ratings_cache() == ({"ok": (7.0, 50)}, date(2026, 11, 20))
+
+def test_ratings_cache_save_in_missing_folder_creates_it(tmp_path, monkeypatch):
+    path = tmp_path / "missing_folder" / "ratings.json"
+    monkeypatch.setattr(boxdlist, "RATINGS_CACHE_FILE", path)
+    boxdlist.write_ratings_cache({"tt1": (8.3, 10)}, date(2026, 11, 20))   # must not raise
+    assert path.exists()
+
+def test_ratings_cache_save_error_does_not_crash(tmp_path, monkeypatch):
+    # the "file" is really a folder, so writing to it fails with an OSError
+    folder = tmp_path / "ratings.json"
+    folder.mkdir()
+    monkeypatch.setattr(boxdlist, "RATINGS_CACHE_FILE", folder)
+    boxdlist.write_ratings_cache({"tt1": (8.3, 10)}, date(2026, 11, 20))   # must be silent
+    
+# ---------- wanted_imdb_ids ----------
+def test_wanted_imdb_ids_takes_the_ids_from_the_cache(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": "tt0000001"},
+             boxdlist.movie_key(movies[1]): {"imdb_id": "tt0000002"}}
+    assert boxdlist.wanted_imdb_ids(movies, cache) == {"tt0000001", "tt0000002"}
+
+def test_wanted_imdb_ids_ignores_movies_without_details(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": "tt0000001"}}
+    assert boxdlist.wanted_imdb_ids(movies, cache) == {"tt0000001"}
+
+def test_wanted_imdb_ids_ignores_the_not_found_marker(movies):
+    cache = {boxdlist.movie_key(movies[0]): dict(boxdlist.NOT_FOUND)}
+    assert boxdlist.wanted_imdb_ids(movies, cache) == set()
+
+@pytest.mark.parametrize("imdb_id", [None, "", 123, ["tt1"]])
+def test_wanted_imdb_ids_ignores_invalid_ids(movies, imdb_id):
+    # the proxy sends null when TMDB has no id
+    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": imdb_id}}
+    assert boxdlist.wanted_imdb_ids(movies, cache) == set()
+
+def test_wanted_imdb_ids_ignores_details_without_the_key(movies):
+    # details saved before the proxy sent imdb_id
+    cache = {boxdlist.movie_key(movies[0]): {"genres": ["Comedy"]}}
+    assert boxdlist.wanted_imdb_ids(movies, cache) == set()
+
+def test_wanted_imdb_ids_ignores_movies_that_are_not_in_the_list(movies):
+    # a deleted movie can still be in the cache
+    cache = {("Deleted", "1999"): {"imdb_id": "tt0000009"}}
+    assert boxdlist.wanted_imdb_ids(movies, cache) == set()
+
+def test_wanted_imdb_ids_duplicates_give_one_id():
+    items = [movie("Same"), movie("Same")]
+    cache = {boxdlist.movie_key(items[0]): {"imdb_id": "tt0000001"}}
+    assert boxdlist.wanted_imdb_ids(items, cache) == {"tt0000001"}
+
+def test_wanted_imdb_ids_with_no_movies():
+    assert boxdlist.wanted_imdb_ids([], {}) == set()
+    
+# ---------- ratings_need_update ----------
+TODAY_RATINGS = date(2026, 11, 20)
+
+def test_ratings_need_update_when_there_is_no_date():
+    assert boxdlist.ratings_need_update(None, TODAY_RATINGS) is True
+
+def test_ratings_do_not_need_update_when_saved_today():
+    assert boxdlist.ratings_need_update(TODAY_RATINGS, TODAY_RATINGS) is False
+
+def test_ratings_do_not_need_update_when_recent():
+    assert boxdlist.ratings_need_update(date(2026, 11, 19), TODAY_RATINGS) is False
+
+def test_ratings_do_not_need_update_one_day_before_the_limit():
+    # 6 days old, the limit is 5
+    assert boxdlist.ratings_need_update(date(2026, 11, 14), TODAY_RATINGS) is True
+
+def test_ratings_need_update_exactly_at_the_limit():
+    # 7 days old counts as too old
+    assert boxdlist.ratings_need_update(date(2026, 11, 13), TODAY_RATINGS) is True
+
+def test_ratings_need_update_when_very_old():
+    assert boxdlist.ratings_need_update(date(2025, 1, 1), TODAY_RATINGS) is True
+
+def test_ratings_need_update_when_the_date_is_in_the_future():
+    # the PC clock may have been changed
+    assert boxdlist.ratings_need_update(date(2026, 12, 1), TODAY_RATINGS) is True
+    
+# ---------- ratings state ----------
+def test_app_starts_with_no_ratings(app):
+    assert app.ratings == {}
+    assert app.ratings_updated is None
+    assert app.ratings_file is None
+    assert app.ratings_downloading is False
+    assert app.ratings_loading is False
+    
+# ---------- ratings download ----------
+def test_read_ratings_worker_hands_the_result_to_the_main_thread(app, monkeypatch):
+    asked = []
+    def fake_read(path, wanted):
+        asked.append((path, wanted))
+        return {"tt1": (8.3, 10)}
+    monkeypatch.setattr(boxdlist, "read_downloaded_ratings", fake_read)
+    scheduled = []
+    # capture after() instead of waiting for Tk to run it
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append((ms, func, args)))
+    app._read_ratings_worker({"tt1"}, Path("r.tsv.gz"))
+    assert asked == [(Path("r.tsv.gz"), {"tt1"})]
+    assert scheduled == [(0, app._on_ratings_result, ({"tt1": (8.3, 10)},))]
+
+def test_read_ratings_worker_passes_failures_on(app, monkeypatch):
+    # the fixture already makes read_downloaded_ratings return None
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append(args))
+    app._read_ratings_worker({"tt1"}, Path("r.tsv.gz"))
+    assert scheduled == [(None,)]
+
+@pytest.mark.parametrize("error", [RuntimeError, tk.TclError])
+def test_read_ratings_worker_ignores_a_closed_window(app, monkeypatch, error):
+    def window_is_gone(*args, **kwargs):
+        raise error("window closed")
+    monkeypatch.setattr(app, "after", window_is_gone)
+    app._read_ratings_worker({"tt1"}, Path("r.tsv.gz"))   # must not raise
+
+def test_download_ratings_worker_hands_the_path_to_the_main_thread(app, monkeypatch):
+    path = Path("r.tsv.gz")
+    monkeypatch.setattr(boxdlist, "download_ratings", lambda: path)
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append((ms, func, args)))
+    app._download_ratings_worker()
+    assert scheduled == [(0, app._on_ratings_downloaded, (path,))]
+
+def test_download_ratings_worker_passes_failures_on(app, monkeypatch):
+    # the fixture already makes download_ratings return None
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append(args))
+    app._download_ratings_worker()
+    assert scheduled == [(None,)]
+
+@pytest.mark.parametrize("error", [RuntimeError, tk.TclError])
+def test_download_ratings_worker_closed_window_deletes_the_file(app, tmp_path, monkeypatch, error):
+    path = tmp_path / "r.tsv.gz"
+    path.write_bytes(GOOD_GZ)
+    monkeypatch.setattr(boxdlist, "download_ratings", lambda: path)
+    def window_is_gone(*args, **kwargs):
+        raise error("window closed")
+    monkeypatch.setattr(app, "after", window_is_gone)
+    app._download_ratings_worker()   # must not raise
+    assert not path.exists()   # nobody will read it, so it must not stay behind
+
+def test_ratings_result_shows_a_message(app):
+    app._on_ratings_result({"tt1": (8.3, 10)})
+    assert app.status.cget("text") == "Ratings ready"
+
+def test_ratings_result_failure_shows_a_message(app):
+    app._on_ratings_result(None)
+    assert app.status.cget("text") == "Could not load ratings"
+
+def capture_ratings_writes(monkeypatch):
+    # Fake write_ratings_cache that only records what it was asked to save
+    saved = []
+    monkeypatch.setattr(boxdlist, "write_ratings_cache",
+                        lambda ratings, today: saved.append((dict(ratings), today)))
+    return saved
+
+def test_ratings_result_stores_and_saves_the_ratings(app, monkeypatch):
+    saved = capture_ratings_writes(monkeypatch)
+    app.ratings_loading = True
+    app._on_ratings_result({"tt1": (8.3, 10)})
+    assert app.ratings == {"tt1": (8.3, 10)}
+    assert app.ratings_updated == date.today()
+    assert saved == [({"tt1": (8.3, 10)}, date.today())]
+    assert app.ratings_loading is False
+
+def test_ratings_result_failure_keeps_the_old_ratings(app, monkeypatch):
+    saved = capture_ratings_writes(monkeypatch)
+    app.ratings = {"tt1": (8.3, 10)}
+    app.ratings_updated = date(2026, 11, 1)
+    app.ratings_loading = True
+    app._on_ratings_result(None)
+    assert app.ratings == {"tt1": (8.3, 10)}
+    assert app.ratings_updated == date(2026, 11, 1)   # so the next start tries again
+    assert saved == []
+    assert app.ratings_loading is False
+
+def test_ratings_result_empty_dict_counts_as_success(app, monkeypatch):
+    # the file was read fine, none of our ids were in it
+    saved = capture_ratings_writes(monkeypatch)
+    app.ratings_loading = True
+    app._on_ratings_result({})
+    assert app.ratings == {}
+    assert app.ratings_updated == date.today()
+    assert saved == [({}, date.today())]
+    assert app.ratings_loading is False
+    
+# ---------- update_ratings ----------
+def ratings_ready_app(app, movies):
+    # a list with one movie whose imdb id is already in the details cache
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(movies[0])] = {"imdb_id": "tt0000001"}
+
+def test_update_ratings_starts_the_download_when_there_are_no_saved_ratings(
+        app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.update_ratings()
+    assert len(started) == 1
+    assert started[0].target == app._download_ratings_worker
+    assert app.ratings_downloading is True
+    assert app.ratings_loading is False   # nothing to read yet
+    assert app.status.cget("text") == "Downloading ratings..."
+
+def test_update_ratings_starts_the_download_when_the_ratings_are_old(
+        app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.ratings_updated = date.today() - timedelta(days=30)
+    app.update_ratings()
+    assert len(started) == 1
+    assert started[0].target == app._download_ratings_worker
+
+def test_update_ratings_reads_a_file_that_is_already_downloaded(
+        app, movies, monkeypatch, tmp_path):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    path = tmp_path / "r.tsv.gz"
+    app.ratings_file = path
+    app.update_ratings()
+    assert len(started) == 1
+    assert started[0].target == app._read_ratings_worker
+    assert started[0].args == ({"tt0000001"}, path)
+    assert app.ratings_file is None   # the worker has it now
+    assert app.ratings_loading is True
+
+def test_update_ratings_waits_while_the_download_is_running(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.ratings_downloading = True   # the early download is still running
+    app.update_ratings()
+    assert started == []   # no second download, and nothing to read yet
+    assert app.status.cget("text") == "Downloading ratings..."
+
+def test_update_ratings_skips_fresh_ratings(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.ratings_updated = date.today()
+    app.update_ratings()
+    assert started == []
+    assert app.ratings_downloading is False
+    assert app.ratings_loading is False
+
+def test_update_ratings_with_fresh_ratings_deletes_a_leftover_file(app, movies, tmp_path):
+    ratings_ready_app(app, movies)
+    app.ratings_updated = date.today()
+    leftover = tmp_path / "r.tsv.gz"
+    leftover.write_bytes(GOOD_GZ)
+    app.ratings_file = leftover
+    app.update_ratings()
+    assert not leftover.exists()
+    assert app.ratings_file is None
+
+def test_update_ratings_with_no_ids_downloads_nothing(app, movies, monkeypatch):
+    # movies with no details yet have no imdb id, so there is nothing to look up
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.update_ratings()
+    assert started == []
+    assert app.ratings_downloading is False
+
+def test_update_ratings_with_no_ids_deletes_the_downloaded_file(app, movies, tmp_path):
+    app.set_movies(movies)
+    leftover = tmp_path / "r.tsv.gz"
+    leftover.write_bytes(GOOD_GZ)
+    app.ratings_file = leftover
+    app.update_ratings()
+    assert not leftover.exists()
+    assert app.ratings_file is None
+
+def test_update_ratings_with_no_movies_downloads_nothing(app, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.update_ratings()
+    assert started == []
+
+def test_update_ratings_does_not_start_two_downloads(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.update_ratings()
+    app.update_ratings()   # the first download is still running
+    assert len(started) == 1
+
+def test_update_ratings_does_not_read_twice(app, movies, monkeypatch, tmp_path):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    path = tmp_path / "r.tsv.gz"
+    app.ratings_file = path
+    app.ratings_loading = True   # a read is already running
+    app.update_ratings()
+    assert started == []
+    assert app.ratings_file == path   # kept for later
+
+# ---------- start_ratings_download ----------
+def test_start_ratings_download_starts_only_one_download(app, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.start_ratings_download()
+    app.start_ratings_download()   # already on its way
+    assert len(started) == 1
+    assert started[0].target == app._download_ratings_worker
+    assert app.ratings_downloading is True
+
+def test_start_ratings_download_skips_fresh_ratings(app, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.ratings_updated = date.today()
+    app.start_ratings_download()
+    assert started == []
+    assert app.ratings_downloading is False
+
+def test_start_ratings_download_skips_when_the_file_is_already_here(
+        app, monkeypatch, tmp_path):
+    started = fake_threads(monkeypatch)
+    app.ratings_file = tmp_path / "r.tsv.gz"
+    app.start_ratings_download()
+    assert started == []
+
+def test_start_ratings_download_shows_no_message(app, monkeypatch):
+    # while the details come in, the corner shows their progress instead
+    fake_threads(monkeypatch)
+    app.start_ratings_download()
+    assert app.status.cget("text") == ""
+
+# ---------- _on_ratings_downloaded ----------
+def test_downloaded_file_waits_until_the_details_are_ready(
+        app, movies, monkeypatch, tmp_path):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.prefetch_total = 5   # the details are still arriving
+    app.prefetch_done = 2
+    app.ratings_downloading = True
+    path = tmp_path / "r.tsv.gz"
+    app._on_ratings_downloaded(path)
+    assert app.ratings_downloading is False
+    assert app.ratings_file == path
+    assert started == []   # reading now would miss films that have no id yet
+
+def test_downloaded_file_is_read_when_the_details_are_already_ready(
+        app, movies, monkeypatch, tmp_path):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.prefetch_total = 5
+    app.prefetch_done = 5
+    app.ratings_downloading = True
+    path = tmp_path / "r.tsv.gz"
+    app._on_ratings_downloaded(path)
+    assert len(started) == 1
+    assert started[0].target == app._read_ratings_worker
+    assert started[0].args == ({"tt0000001"}, path)
+    assert app.ratings_file is None
+    assert app.ratings_loading is True
+
+def test_failed_download_shows_a_message_and_reads_nothing(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.ratings_downloading = True
+    app._on_ratings_downloaded(None)
+    assert app.ratings_downloading is False
+    assert app.ratings_file is None
+    assert started == []
+    assert app.status.cget("text") == "Could not download ratings"
+
+# ---------- ratings start with the details ----------
+def test_prefetch_with_everything_cached_starts_the_ratings_download(
+        app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    for m in movies[1:]:
+        app.details_cache[boxdlist.movie_key(m)] = DETAILS_WITH_ID
+    app.prefetch_details()
+    assert app.executor.submitted == []   # no details to fetch
+    assert len(started) == 1
+    assert started[0].target == app._download_ratings_worker
+
+def test_prefetch_with_pending_details_starts_the_download_at_once(
+        app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.prefetch_details()
+    assert len(app.executor.submitted) == 4
+    assert len(started) == 1   # the file downloads while the details come in
+    assert started[0].target == app._download_ratings_worker
+
+def test_prefetch_with_pending_details_and_fresh_ratings_downloads_nothing(
+        app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.ratings_updated = date.today()
+    app.prefetch_details()
+    assert started == []
+
+def test_last_prefetch_result_reads_the_downloaded_file(
+        app, movies, monkeypatch, tmp_path):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    path = tmp_path / "r.tsv.gz"
+    app.ratings_file = path   # the early download already finished
+    app.prefetch_total = 1
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], {"imdb_id": "tt0000001"})
+    assert len(started) == 1
+    assert started[0].target == app._read_ratings_worker
+    assert started[0].args == ({"tt0000001"}, path)
+
+def test_last_prefetch_result_waits_for_a_download_that_is_still_running(
+        app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.ratings_downloading = True
+    app.prefetch_total = 1
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], {"imdb_id": "tt0000001"})
+    assert started == []   # _on_ratings_downloaded will read it later
+    assert app.status.cget("text") == "Downloading ratings..."
+
+def test_last_prefetch_result_starts_a_download_if_there_is_none(
+        app, movies, monkeypatch):
+    # for example, the early download failed
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.prefetch_total = 1
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], {"imdb_id": "tt0000001"})
+    assert len(started) == 1
+    assert started[0].target == app._download_ratings_worker
+
+def test_prefetch_result_in_the_middle_does_not_touch_the_ratings(
+        app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.prefetch_total = 2
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], {"imdb_id": "tt0000001"})
+    assert started == []   # one more answer is still missing
+
+def test_on_close_deletes_a_downloaded_ratings_file(app, monkeypatch, tmp_path):
+    monkeypatch.setattr(boxdlist, "read_config", lambda: {})
+    monkeypatch.setattr(boxdlist, "write_config", lambda data: None)
+    monkeypatch.setattr(app, "destroy", lambda: None)
+    leftover = tmp_path / "r.tsv.gz"
+    leftover.write_bytes(GOOD_GZ)
+    app.ratings_file = leftover
+    app.on_close()
+    assert not leftover.exists()
+    assert app.ratings_file is None
+    
+# ---------- details_outdated ----------
+@pytest.mark.parametrize("details, expected", [
+    ({"genres": ["Comedy"]}, True),      # saved before imdb_id existed
+    ({}, True),
+    ({"imdb_id": "tt0000001"}, False),   # up to date
+    ({"imdb_id": None}, False),          # TMDB has no id: the key exists, do not ask again
+    (dict(boxdlist.NOT_FOUND), False),   # never has an id, never asked again
+])
+def test_details_outdated(details, expected):
+    assert boxdlist.details_outdated(details) is expected
+
+def test_movies_to_fetch_asks_again_for_outdated_details(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"runtime": 90}}   # no imdb_id
+    result = boxdlist.movies_to_fetch(movies, cache, set())
+    assert names(result) == names(movies)
+
+def test_movies_to_fetch_skips_up_to_date_details(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": None}}   # null counts as up to date
+    result = boxdlist.movies_to_fetch(movies, cache, set())
+    assert "Amélie" not in names(result)
+
+def test_movies_to_fetch_skips_the_not_found_marker(movies):
+    cache = {boxdlist.movie_key(movies[0]): dict(boxdlist.NOT_FOUND)}
+    result = boxdlist.movies_to_fetch(movies, cache, set())
+    assert "Amélie" not in names(result)
+
+def test_movies_to_fetch_outdated_details_still_respect_the_waiting_list(movies):
+    key = boxdlist.movie_key(movies[0])
+    result = boxdlist.movies_to_fetch(movies, {key: {"runtime": 90}}, {key})
+    assert "Amélie" not in names(result)   # already on its way
+
+def test_prefetch_asks_again_for_outdated_details(app, movies):
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(movies[0])] = DETAILS   # no imdb_id
+    app.prefetch_details()
+    assert "Amélie" in names(submitted_movies(app))
+
+def test_outdated_details_are_replaced_by_the_new_answer(app, movies):
+    key = boxdlist.movie_key(movies[0])
+    app.details_cache[key] = {"runtime": 90}
+    app.prefetch_total = 2
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], DETAILS_WITH_ID)
+    assert app.details_cache[key] == DETAILS_WITH_ID
+
+def test_failed_request_keeps_the_old_details(app, movies):
+    # the old entry stays, so the next start tries again
+    key = boxdlist.movie_key(movies[0])
+    app.details_cache[key] = DETAILS
+    app.prefetch_total = 2
+    app.prefetch_done = 0
+    app._on_prefetch_result(movies[0], None)
+    assert app.details_cache[key] == DETAILS
+    
+# ---------- format_rating ----------
+@pytest.mark.parametrize("rating, votes, expected", [
+    (8.2, 850628, "★ 8.2/10 (850k votes)"),
+    (7.5, 1200000, "★ 7.5/10 (1.2M votes)"),
+    (6.0, 950, "★ 6.0/10 (950 votes)"),      # one decimal, so 6.0 and not 6
+    (7, 50, "★ 7.0/10 (50 votes)"),          # a whole number rating is fine
+    (10, 100, "★ 10.0/10 (100 votes)"),      # the highest valid rating
+    (8.3, 0, "★ 8.3/10 (0 votes)"),
+    (8.3, 999, "★ 8.3/10 (999 votes)"),      # just below the thousands limit
+    (8.3, 1000, "★ 8.3/10 (1k votes)"),      # exactly at the limit
+    (8.3, 999999, "★ 8.3/10 (999k votes)"),  # just below the millions limit
+    (8.3, 1000000, "★ 8.3/10 (1.0M votes)"), # exactly at the limit
+])
+def test_format_rating(rating, votes, expected):
+    assert boxdlist.format_rating(rating, votes) == expected
+
+@pytest.mark.parametrize("rating, votes", [
+    (0, 100),        # no rating yet
+    (-1, 100),       # negative makes no sense
+    (10.5, 100),     # above the scale
+    (None, 100),     # missing
+    ("8.2", 100),    # text is not trusted
+    (True, 100),     # True counts as 1 in Python, but it is not a rating
+    (8.2, None),     # missing votes
+    (8.2, "100"),    # text is not trusted
+    (8.2, 10.5),     # a float is not a whole number of votes
+    (8.2, True),     # True is not a number of votes
+    (8.2, -1),       # negative makes no sense
+])
+def test_format_rating_invalid_values_give_empty_text(rating, votes):
+    assert boxdlist.format_rating(rating, votes) == ""
+        
+# ---------- the panel refreshes when the ratings arrive ----------
+WITH_ID = {"genres": ["Comedy"], "runtime": 122, "imdb_id": "tt0000001"}
+
+def cached_with_id(app, movie_item):
+    # puts up to date details (with an imdb id) in the cache
+    app.details_cache[boxdlist.movie_key(movie_item)] = {**WITH_ID, "overview": "A story."}
+
+def test_ratings_arriving_refresh_the_open_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    select_row(app, "0")
+    assert panel_texts(app) == ("Amélie (2001)", "Comedy · 2h 02min", "A story.")
+    assert app.details_rating.cget("text") == ""   # no rating yet
+    app._on_ratings_result({"tt0000001": (8.2, 850628)})
+    assert panel_texts(app) == ("Amélie (2001)", "Comedy · 2h 02min", "A story.")
+    assert app.details_rating.cget("text") == "★ 8.2/10 (850k votes)"
+
+def test_ratings_arriving_do_not_replace_the_loading_message(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")   # no details in the cache, so it shows "Loading..."
+    app._on_ratings_result({"tt0000001": (8.2, 850628)})
+    assert panel_texts(app) == ("Amélie (2001)", "", "Loading...")
+
+def test_ratings_arriving_do_not_replace_the_error_message(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], None)   # the request failed
+    app._on_ratings_result({"tt0000001": (8.2, 850628)})
+    assert panel_texts(app) == ("Amélie (2001)", "", "Could not load details.")
+
+def test_ratings_arriving_with_nothing_selected_keep_the_panel_empty(app, movies):
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    app._on_ratings_result({"tt0000001": (8.2, 850628)})
+    assert panel_texts(app) == ("", "", "")
+
+def test_failed_ratings_do_not_touch_the_panel(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    select_row(app, "0")
+    app._on_ratings_result(None)
+    assert app.details_meta.cget("text") == "Comedy · 2h 02min"
+
+def test_ratings_arriving_with_several_movies_selected_do_not_crash(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch)
+    app.set_movies(movies)
+    select_two(app)
+    app._on_ratings_result({"tt0000001": (8.2, 850628)})
+    assert app.details_target is None
+    assert panel_texts(app) == ("", "", "")   # the one movie view stays empty
+    
+# ---------- ratings in the list of several movies ----------
+def test_list_shows_the_ratings(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40, width=60)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    app.ratings = {"tt0000001": (8.2, 850628)}
+    select_two(app)
+    assert "★ 8.2/10 (850k votes)" in summary_text(app)
+
+def test_ratings_arriving_refresh_the_list(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40, width=60)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    select_two(app)
+    assert "★" not in summary_text(app)   # no ratings yet
+    app._on_ratings_result({"tt0000001": (8.2, 850628)})
+    assert "★ 8.2/10 (850k votes)" in summary_text(app)
+
+def test_failed_ratings_do_not_touch_the_list(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40, width=60)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    select_two(app)
+    before = summary_text(app)
+    app._on_ratings_result(None)
+    assert summary_text(app) == before
+    
+# ---------- rating_line ----------
+def test_rating_line_with_a_rating():
+    assert boxdlist.rating_line(WITH_ID, {"tt0000001": (8.2, 850628)}) == "★ 8.2/10 (850k votes)"
+
+def test_rating_line_without_the_rating_yet():
+    assert boxdlist.rating_line(WITH_ID, {}) == ""
+
+def test_rating_line_with_a_rating_for_another_movie():
+    assert boxdlist.rating_line(WITH_ID, {"tt0000009": (8.2, 10)}) == ""
+
+@pytest.mark.parametrize("imdb_id", [None, "", 123, ["tt1"]])
+def test_rating_line_ignores_an_invalid_imdb_id(imdb_id):
+    # the proxy sends null when TMDB has no id
+    assert boxdlist.rating_line({"imdb_id": imdb_id}, {"tt1": (8.2, 10)}) == ""
+
+def test_rating_line_without_the_imdb_key():
+    # details saved before the proxy sent imdb_id
+    assert boxdlist.rating_line({"genres": ["Comedy"]}, {"tt1": (8.2, 10)}) == ""
+
+def test_rating_line_with_an_invalid_rating():
+    assert boxdlist.rating_line(WITH_ID, {"tt0000001": (99, 10)}) == ""
+
+# ---------- rating on its own line in the list ----------
+def summary_with_rating(width):
+    # one movie with details and a rating, drawn at the given width
+    movie_item = movie("Amélie", "2001")
+    cache = {boxdlist.movie_key(movie_item): {
+        "genres": ["Science Fiction", "Adventure", "Mystery"], "runtime": 150,
+        "imdb_id": "tt0000001", "overview": "A story."}}
+    ratings = {"tt0000001": (8.2, 850628)}
+    return boxdlist.build_summary([movie_item], 1, True, width, cache, set(), ratings)
+
+def test_build_summary_puts_the_rating_on_its_own_line():
+    lines = summary_with_rating(60)
+    assert lines[3] == ("Science Fiction, Adventure, Mystery · 2h 30min", "meta")
+    assert lines[4] == ("★ 8.2/10 (850k votes)", "meta")
+
+def test_build_summary_never_cuts_the_rating_in_a_narrow_panel():
+    lines = summary_with_rating(25)
+    assert lines[3][0].endswith("...")                 # the genres are cut
+    assert len(lines[3][0]) <= 25
+    assert lines[4] == ("★ 8.2/10 (850k votes)", "meta")   # the rating is not
+
+def test_build_summary_without_ratings_keeps_an_empty_rating_line(movies):
+    # the new parameter is optional, so the old calls keep working
+    cache = {boxdlist.movie_key(movies[0]): {**WITH_ID, "overview": "A story."}}
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set())
+    assert lines[3] == ("Comedy · 2h 02min", "meta")
+    assert lines[4] == ("", "meta")
+
+def test_build_summary_with_a_rating_for_another_movie(movies):
+    cache = {boxdlist.movie_key(movies[0]): {**WITH_ID, "overview": "A story."}}
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set(),
+                                   {"tt0000009": (8.2, 10)})
+    assert lines[4] == ("", "meta")
+
+def test_build_summary_each_movie_takes_detail_lines(movies):
+    lines = boxdlist.build_summary(movies[:2], 2, True, 30, {}, set())
+    assert len(lines) == boxdlist.SUMMARY_HEADER_LINES + 2 * boxdlist.DETAIL_LINES
+    
+# ---------- show_status with keep ----------
+def test_show_status_with_keep_does_not_clear_itself(app, monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func: scheduled.append((ms, func)) or "job")
+    app._status_job = None
+    app.show_status("Downloading...", keep=True)
+    assert app.status.cget("text") == "Downloading..."
+    assert scheduled == []   # no timer, so the text stays
+
+def test_show_status_replaces_a_kept_message(app, monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func: scheduled.append((ms, func)) or "job")
+    app._status_job = None
+    app.show_status("Downloading...", keep=True)
+    app.show_status("Ratings ready")
+    assert app.status.cget("text") == "Ratings ready"
+    assert len(scheduled) == 1   # the new message clears itself
+    scheduled[0][1]()
+    assert app.status.cget("text") == ""
+
+def test_show_status_with_keep_cancels_the_pending_clear(app, monkeypatch):
+    cancelled = []
+    monkeypatch.setattr(app, "after", lambda ms, func: "job-1")
+    monkeypatch.setattr(app, "after_cancel", lambda job: cancelled.append(job))
+    app._status_job = None
+    app.show_status("hello")
+    app.show_status("Downloading...", keep=True)
+    assert cancelled == ["job-1"]   # the old timer must not wipe the kept message
+    
+# ---------- rating on its own line in the panel ----------
+def test_show_details_puts_the_rating_on_its_own_line(app):
+    app.ratings = {"tt0000001": (8.2, 850628)}
+    app.show_details(movie("Amélie", "2001"), {**WITH_ID, "overview": "A story."})
+    assert panel_texts(app) == ("Amélie (2001)", "Comedy · 2h 02min", "A story.")
+    assert app.details_rating.cget("text") == "★ 8.2/10 (850k votes)"
+
+def test_show_details_without_the_rating_leaves_the_line_empty(app):
+    app.show_details(movie("Amélie", "2001"), {**WITH_ID, "overview": "A story."})
+    assert panel_texts(app)[1] == "Comedy · 2h 02min"
+    assert app.details_rating.cget("text") == ""
+
+def test_show_details_without_details_has_no_rating(app):
+    app.ratings = {"tt0000001": (8.2, 850628)}
+    app.show_details(movie("Amélie", "2001"), None)
+    assert app.details_rating.cget("text") == ""
+
+def test_show_details_not_found_has_no_rating(app):
+    app.ratings = {"tt0000001": (8.2, 850628)}
+    app.show_details(movie("Amélie", "2001"), dict(boxdlist.NOT_FOUND))
+    assert app.details_rating.cget("text") == ""
+
+def test_show_message_clears_the_rating(app):
+    app.ratings = {"tt0000001": (8.2, 850628)}
+    app.show_details(movie("Amélie", "2001"), {**WITH_ID, "overview": "A story."})
+    app.show_message(movie("Blade Runner", "1982"), "Loading...")
+    # the rating of the old movie must not stay under the new title
+    assert app.details_rating.cget("text") == ""
+
+def test_clear_details_clears_the_rating(app):
+    app.ratings = {"tt0000001": (8.2, 850628)}
+    app.show_details(movie("Amélie", "2001"), {**WITH_ID, "overview": "A story."})
+    app.clear_details()
+    assert app.details_rating.cget("text") == ""
+
+# ---------- closing the window ----------
+def test_on_close_closes_the_window_even_if_saving_fails(app, monkeypatch):
+    closed = []
+    monkeypatch.setattr(boxdlist, "read_config", lambda: {})
+    def boom(data):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(boxdlist, "write_config", boom)
+    monkeypatch.setattr(app, "destroy", lambda: closed.append(1))
+    with pytest.raises(RuntimeError):
+        app.on_close()
+    assert closed == [1]   # the window still closes
+
+def test_on_close_closes_the_window_if_the_ratings_file_cannot_be_deleted(
+        app, monkeypatch):
+    closed = []
+    monkeypatch.setattr(boxdlist, "read_config", lambda: {})
+    monkeypatch.setattr(boxdlist, "write_config", lambda data: None)
+    monkeypatch.setattr(app, "destroy", lambda: closed.append(1))
+    class LockedFile:
+        # like a file that Windows will not let us delete
+        def unlink(self, missing_ok=False):
+            raise PermissionError("in use")
+    app.ratings_file = LockedFile()
+    app.on_close()   # must not raise
+    assert closed == [1]
+    assert app.ratings_file is None
+
+def test_discard_ratings_file_without_a_file_does_nothing(app):
+    app.ratings_file = None
+    app.discard_ratings_file()   # must not raise
+    assert app.ratings_file is None

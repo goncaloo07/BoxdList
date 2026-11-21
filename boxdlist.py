@@ -25,6 +25,7 @@ import ctypes
 from datetime import date, timedelta
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
+import gzip
   
 def app_folder() -> Path:
     """Folder of the .exe when frozen, or of this file when running the code."""
@@ -48,7 +49,7 @@ DETAILS_WIDTH = 260
 DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.0.18"
+APP_VERSION = "1.0.19"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
@@ -56,11 +57,14 @@ RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
 MAX_OPEN_AT_ONCE = 5 # above this, ask before opening many pages
 DEFAULT_SORT_COLUMN = "date"   # sort used when nothing valid was saved
 SUMMARY_HEADER_LINES = 2   # "3 movies selected" and a blank line
-DETAIL_LINES = 5           # title, genres, 2 lines of synopsis, blank line
+DETAIL_LINES = 6           # title, genres, rating, 2 lines of synopsis, blank line
 MIN_DETAILED = 3           # fewer detailed movies than this: names only
 DETAILS_CACHE_FILE = app_folder() / "data" / "details_cache.json"
 DETAILS_WORKERS = 12
 NOT_FOUND = {"not_found": True}
+RATINGS_URL = "https://datasets.imdbws.com/title.ratings.tsv.gz"    
+RATINGS_CACHE_FILE = app_folder() / "data" / "ratings_cache.json"
+RATINGS_MAX_AGE_DAYS = 5
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -354,14 +358,21 @@ def count_duplicates(movies: list[dict]) -> int:
             seen.add(key)
     return count
 
+def details_outdated(details: dict) -> bool:
+    """True if the details were saved before the proxy sent 'imdb_id'."""
+    if is_not_found(details):
+        return False
+    return "imdb_id" not in details    
+
 def movies_to_fetch(movies: list[dict], cache: dict, skip: set) -> list[dict]:
     """Movies that still need details, one per name+year."""
     seen = set()
     result = []
     for m in movies:
         key = movie_key(m)
-        # already known, already on its way, or already in this list
-        if key in cache or key in skip or key in seen:
+        # in the cache AND up to date: nothing to fetch
+        known = key in cache and not details_outdated(cache[key])
+        if known or key in skip or key in seen:
             continue
         seen.add(key)
         result.append(m)
@@ -376,6 +387,32 @@ def format_runtime(minutes) -> str:
         return f"{mins}min"
     return f"{hours}h {mins:02d}min"
 
+def format_rating(rating, votes) -> str:
+    """8.2, 850628 -> '★ 8.2/10 (850k votes)'. Missing or invalid -> ''."""
+    # bool is a kind of int in Python, so it is excluded by hand
+    if (isinstance(rating, bool) or not isinstance(rating, (int, float))
+            or isinstance(votes, bool) or not isinstance(votes, int)):
+        return ""
+    if not 0 < rating <= 10 or votes < 0:
+        return ""
+    if votes >= 1_000_000:
+        shown = f"{votes / 1_000_000:.1f}M"
+    elif votes >= 1000:
+        shown = f"{votes // 1000}k"   # whole thousands, so 999999 gives 999k
+    else:
+        shown = str(votes)
+    return f"★ {rating:.1f}/10 ({shown} votes)"
+
+def rating_line(details: dict, ratings: dict) -> str:
+    """'★ 8.2/10 (850k votes)'. Empty if there is no id or no rating yet."""
+    imdb_id = details.get("imdb_id")
+    # the proxy sends null when TMDB has no id
+    if not isinstance(imdb_id, str):
+        return ""
+    entry = ratings.get(imdb_id)
+    # format_rating gives "" for invalid values
+    return format_rating(*entry) if entry else ""
+
 def details_line(details: dict) -> str:
     """'Comedy, Romance · 2h 02min'. Leaves out whatever is missing."""
     parts = []
@@ -388,6 +425,93 @@ def details_line(details: dict) -> str:
     if runtime:
         parts.append(runtime)
     return " · ".join(parts)
+
+def read_ratings(path: Path, wanted: set[str]) -> dict[str, tuple[float, int]]:
+    """Reads the IMDb ratings file and keeps only the ids in 'wanted'."""
+    ratings = {}
+    # "rt" makes the .gz file behave like a normal text file
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        next(f, None)   # skips the header line
+        for line in f:
+            try:
+                tconst, rating, votes = line.rstrip("\n").split("\t")
+                if tconst not in wanted:
+                    continue
+                ratings[tconst] = (float(rating), int(votes))
+            except ValueError:
+                continue   # broken line: skip it
+    return ratings
+
+def download_ratings() -> Path | None:
+    """Downloads the IMDb ratings file. Returns its path, or None if it failed."""
+    target = Path(tempfile.gettempdir()) / "boxdlist_ratings.tsv.gz"
+    if download_file(RATINGS_URL, target):
+        return target
+    target.unlink(missing_ok=True)   # a cut file must not stay behind
+    return None
+
+def read_downloaded_ratings(path: Path, wanted: set[str]) -> dict[str, tuple[float, int]] | None:
+    """Reads a downloaded ratings file, then deletes it.
+    Returns None if the file is broken, so it can be tried again later.
+    """
+    try:
+        return read_ratings(path, wanted)
+    except (OSError, EOFError):
+        return None   # broken or cut file
+    finally:
+        path.unlink(missing_ok=True)   # never leave the big file behind
+        
+def write_ratings_cache(ratings: dict, today: date) -> None:
+    """Saves the ratings and the update date. Not critical, so errors are ignored."""
+    data = {"updated": today.isoformat(), "ratings": ratings}
+    try:
+        RATINGS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RATINGS_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    
+def read_ratings_cache() -> tuple[dict[str, tuple[float, int]], date | None]:
+    """Returns (ratings, update date). Empty and None if there is a problem."""
+    try:
+        data = json.loads(RATINGS_CACHE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, None   # missing or broken file
+    if not isinstance(data, dict):
+        return {}, None
+    try:
+        updated = date.fromisoformat(data.get("updated", ""))
+    except (ValueError, TypeError):
+        updated = None   # missing or invalid date
+    saved = data.get("ratings")
+    if not isinstance(saved, dict):
+        return {}, updated
+    ratings = {}
+    for imdb_id, value in saved.items():
+        # JSON gives lists, so we check the shape and turn them back into tuples
+        if (isinstance(value, list) and len(value) == 2
+                and isinstance(value[0], (int, float)) and not isinstance(value[0], bool)
+                and isinstance(value[1], int) and not isinstance(value[1], bool)):
+            ratings[imdb_id] = (float(value[0]), value[1])
+    return ratings, updated        
+
+def wanted_imdb_ids(movies: list[dict], cache: dict) -> set[str]:
+    """IMDb ids of the movies in the list, taken from the details cache."""
+    ids = set()
+    for m in movies:
+        details = cache.get(movie_key(m))
+        if not details:
+            continue   # no details yet
+        imdb_id = details.get("imdb_id")
+        # the proxy sends null when TMDB has no id, and "not found" has none
+        if not isinstance(imdb_id, str) or not imdb_id:
+            continue
+        ids.add(imdb_id)
+    return ids
+
+def ratings_need_update(updated: date | None, today: date) -> bool:
+    """True if the saved ratings are missing or too old."""
+    return (updated is None or updated > today
+            or (today - updated).days >= RATINGS_MAX_AGE_DAYS)
 
 def plan_summary(total: int, lines: int) -> tuple[bool, int]:
     """Decides how the list of selected movies looks.
@@ -407,8 +531,8 @@ def plan_summary(total: int, lines: int) -> tuple[bool, int]:
     return False, max(usable - 1, 0)
 
 
-def build_summary(movies: list[dict], shown: int, with_details: bool,
-                  width: int, cache: dict, loading: set) -> list[tuple[str, str]]:
+def build_summary(movies, shown, with_details, width, cache, loading,
+                  ratings: dict | None = None) -> list[tuple[str, str]]:
     """Lines of the multi-selection list, as (text, style) pairs.
     'width' is how many characters fit in one line. 'cache' holds the
     details we already have and 'loading' the movies being requested.
@@ -422,13 +546,17 @@ def build_summary(movies: list[dict], shown: int, with_details: bool,
             continue
         key = movie_key(movie)
         details = cache.get(key)
+        rating = ""
         if details:
-            meta = details_line(details)
+            meta = details_line(details)   # genres and runtime only
+            rating = rating_line(details, ratings or {})
         elif key in loading:
             meta = "Loading..."
         else:
             meta = ""
         lines.append((textwrap.shorten(meta, width, placeholder="..."), "meta"))
+        # always one line, even when empty, so the list does not jump
+        lines.append((textwrap.shorten(rating, width, placeholder="..."), "meta"))
         overview = details.get("overview") if details else None
         text = overview.strip() if isinstance(overview, str) else ""
         wrapped = (textwrap.wrap(text, width, max_lines=2, placeholder="...")
@@ -606,6 +734,11 @@ class App(TkinterDnD.Tk):
         self.executor = ThreadPoolExecutor(max_workers=DETAILS_WORKERS)
         self.prefetch_total = 0   # how many movies this round has to fetch
         self.prefetch_done = 0    # how many already answered
+        # ratings saved on disk (imdb id -> (rating, votes)) and when they were downloaded
+        self.ratings, self.ratings_updated = read_ratings_cache()
+        self.ratings_downloading = False   # True while the ratings file is downloading
+        self.ratings_file: Path | None = None   # downloaded file, waiting to be read
+        self.ratings_loading = False   # True while that file is being read
         
         # ---------- Header: logo and app name ----------
         header = ttk.Frame(self, padding=(self.px(12), self.px(10), self.px(12), 0))
@@ -725,6 +858,9 @@ class App(TkinterDnD.Tk):
         self.details_meta = ttk.Label(self.single_view, text="", wraplength=wrap,
                                       justify="left", foreground=MUTED)
         self.details_meta.pack(anchor="w", pady=(self.px(2), 0))
+        self.details_rating = ttk.Label(self.single_view, text="", wraplength=wrap,
+                                        justify="left", foreground=MUTED)
+        self.details_rating.pack(anchor="w", pady=(self.px(2), 0))
         self.details_overview = ttk.Label(self.single_view, text="", wraplength=wrap,
                                           justify="left")
         self.details_overview.pack(anchor="w", pady=(self.px(10), 0))
@@ -1031,12 +1167,17 @@ class App(TkinterDnD.Tk):
             return
         self.load_path(path)       
         
-    def show_status(self, text: str) -> None:
-        """Shows a short message that clears itself after 4 seconds."""
+    def show_status(self, text: str, keep: bool = False) -> None:
+        """Shows a short message that clears itself after 3 seconds.
+        With keep=True it stays until the next message replaces it.
+        """
         if self._status_job is not None:
             self.after_cancel(self._status_job)
+            self._status_job = None
         self.status.config(text=text)
-        self._status_job = self.after(3000, lambda: self.status.config(text="")) 
+        if keep:
+            return   # no timer, so the text stays
+        self._status_job = self.after(3000, lambda: self.status.config(text=""))
         
     def update_decades(self) -> None:
         """Refreshes the decade dropdown with the decades that exist in the list."""
@@ -1370,14 +1511,15 @@ class App(TkinterDnD.Tk):
         """Fills the panel. 'details' is None if the lookup failed."""
         year = f" ({movie['year']})" if movie["year"] else ""
         self.details_title.config(text=movie["name"] + year)
-        # details_line cannot take None, so decide first
+        # the line functions cannot take None, so decide first
         self.details_meta.config(text=details_line(details) if details else "")
+        self.details_rating.config(
+            text=rating_line(details, self.ratings) if details else "")
         overview = details.get("overview") if details else None
         if is_not_found(details):
             overview = "No details found for this movie."
         elif not isinstance(overview, str) or not overview.strip():
             overview = "No synopsis available."
-        self.details_overview.config(text=overview.strip())
         self.details_overview.config(text=overview.strip())
         
     def show_message(self, movie: dict, text: str) -> None:
@@ -1385,6 +1527,7 @@ class App(TkinterDnD.Tk):
         year = f" ({movie['year']})" if movie["year"] else ""
         self.details_title.config(text=movie["name"] + year)
         self.details_meta.config(text="")   # clear the old genres and runtime
+        self.details_rating.config(text="")   # and the old rating
         self.details_overview.config(text=text)
         
     def on_select(self) -> None:
@@ -1424,7 +1567,7 @@ class App(TkinterDnD.Tk):
     def clear_details(self) -> None:
         """Empties the panel (nothing selected)."""
         for label in (self.details_title, self.details_meta,
-                      self.details_overview):
+                      self.details_rating, self.details_overview):
             label.config(text="")
             
     def show_panel(self) -> None:
@@ -1470,7 +1613,9 @@ class App(TkinterDnD.Tk):
         """Fetches the details of every movie in the background."""
         todo = movies_to_fetch(self.movies, self.details_cache, self.details_inflight)
         if not todo:
+            self.update_ratings()   # all details are already known
             return
+        self.start_ratings_download()   # downloads while the details come in
         for m in todo:
             self.details_inflight.add(movie_key(m))
             self.executor.submit(self._prefetch_worker, m)
@@ -1491,8 +1636,95 @@ class App(TkinterDnD.Tk):
         self.prefetch_done += 1
         if self.prefetch_done >= self.prefetch_total:
             self.show_status("Details ready")
+            self.update_ratings()
         else:
             self.show_status(f"Details {self.prefetch_done}/{self.prefetch_total}")
+            
+    def start_ratings_download(self) -> None:
+        """Starts downloading the ratings file, if it is needed and not started yet."""
+        if self.ratings_downloading or self.ratings_file is not None:
+            return   # already on its way, or already here
+        if not ratings_need_update(self.ratings_updated, date.today()):
+            return   # the saved ratings are still fresh
+        self.ratings_downloading = True   # set it before the thread starts
+        threading.Thread(target=self._download_ratings_worker, daemon=True).start()
+
+    def _download_ratings_worker(self) -> None:
+        """Downloads the ratings file. Runs in a background thread."""
+        path = download_ratings()   # slow part, runs in the background
+        try:
+            self.after(0, self._on_ratings_downloaded, path)
+        except (RuntimeError, tk.TclError):
+            # the window is gone, so nobody will read the file
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+    def _on_ratings_downloaded(self, path: Path | None) -> None:
+        """Runs on the main thread when the download finished or failed."""
+        self.ratings_downloading = False
+        if path is None:
+            self.show_status("Could not download ratings")
+            return
+        self.ratings_file = path
+        # only read it when every film has its details (and so its imdb id)
+        if self.prefetch_done >= self.prefetch_total:
+            self.update_ratings()
+
+    def discard_ratings_file(self) -> None:
+        """Deletes a downloaded ratings file that will not be used."""
+        if self.ratings_file is None:
+            return
+        try:
+            self.ratings_file.unlink(missing_ok=True)
+        except OSError:
+            pass   # still in use (Windows): it is only a temp file
+        self.ratings_file = None
+
+    def update_ratings(self) -> None:
+        """Reads the ratings of the films in the list, only if it is needed."""
+        if self.ratings_loading:
+            return   # a read is already running
+        wanted = wanted_imdb_ids(self.movies, self.details_cache)
+        if not wanted or not ratings_need_update(self.ratings_updated, date.today()):
+            self.discard_ratings_file()   # nothing to look up, so the file is not needed
+            return
+        self.start_ratings_download()   # does nothing if it already started
+        if self.ratings_file is None:
+            self.show_status("Downloading ratings...", keep=True)
+            return   # _on_ratings_downloaded calls this method again
+        path, self.ratings_file = self.ratings_file, None
+        self.ratings_loading = True   # set it before the thread starts
+        threading.Thread(target=self._read_ratings_worker, args=(wanted, path),
+                         daemon=True).start()
+
+    def _read_ratings_worker(self, wanted: set[str], path: Path) -> None:
+        """Reads the downloaded ratings file. Runs in a background thread."""
+        ratings = read_downloaded_ratings(path, wanted)
+        try:
+            self.after(0, self._on_ratings_result, ratings)
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def _on_ratings_result(self, ratings: dict | None) -> None:
+        """Runs on the main thread when the read finished or failed."""
+        self.ratings_loading = False
+        if ratings is None:
+            self.show_status("Could not load ratings")
+            return
+        self.ratings = ratings
+        self.ratings_updated = date.today()
+        write_ratings_cache(self.ratings, self.ratings_updated)
+        self.show_status("Ratings ready")
+        if self.summary_movies:
+            self.render_summary()   # several movies selected: refresh the list
+            return
+        # one movie selected: refresh the panel, so the rating shows up
+        movie = self.details_target
+        if movie is None:
+            return   # nothing selected
+        details = self.details_cache.get(movie_key(movie))
+        if details:
+            self.show_details(movie, details)
 
     def render_summary(self) -> None:
         """Draws the list of selected movies, as detailed as the space allows."""
@@ -1505,7 +1737,7 @@ class App(TkinterDnD.Tk):
             self.request_missing_details(self.summary_movies[:shown])
         lines = build_summary(self.summary_movies, shown, with_details,
                               self.summary_width(), self.details_cache,
-                              self.details_inflight)
+                              self.details_inflight, self.ratings)
         self.summary.config(state="normal")   # a disabled Text cannot be changed
         self.summary.delete("1.0", "end")
         for text, style in lines:
@@ -1606,16 +1838,19 @@ class App(TkinterDnD.Tk):
         
     def on_close(self) -> None:
         """Saves the sort and window size, then closes the app."""
-        data = read_config()
-        data["sort_column"] = self.sort_column
-        data["reverse_order"] = self.reverse_order
-        data["window_size"] = (f"{self.winfo_width()}x{self.winfo_height()}"
-                               f"+{self.winfo_x()}+{self.winfo_y()}")
-        write_config(data)
-        write_details_cache(self.details_cache)
-        self.executor.shutdown(wait=False, cancel_futures=True)
-        self.destroy()
-
+        try:
+            data = read_config()
+            data["sort_column"] = self.sort_column
+            data["reverse_order"] = self.reverse_order
+            data["window_size"] = (f"{self.winfo_width()}x{self.winfo_height()}"
+                                   f"+{self.winfo_x()}+{self.winfo_y()}")
+            write_config(data)
+            write_details_cache(self.details_cache)
+        finally:
+            # whatever fails above, the window must close
+            self.discard_ratings_file()
+            self.executor.shutdown(wait=False, cancel_futures=True)
+            self.destroy()
 
 if __name__ == "__main__":
     enable_dpi_awareness()   # must run before the window is created

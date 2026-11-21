@@ -14,8 +14,8 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Filter by when you added the film (last 7 days, last 30 days or last year)
 - Remembers the window size, its position and the sort order
 - Random pick from the films currently shown, never repeating the previous one
-- Select a film to see its genres, runtime and synopsis. After you import, the details are fetched in the background and saved on your computer, so they load instantly next time
-- Select several films (drag, `Ctrl+click` or `Shift+click`) to see a list that fits the available space: as many films as possible with their details, or just the names when there is little room
+- Select a film to see its genres, runtime, synopsis and IMDb rating. After you import, the details are fetched in the background and saved on your computer, so they load instantly next time
+- Select several films (drag, `Ctrl+click` or `Shift+click`) to see a list that fits the available space: as many films as possible with their details and IMDb rating, or just the names when there is little room
 - `Enter` and `Delete` work on all the selected films at once
 - Double-click a film (or press `Enter`) to open its Letterboxd page
 - Right-click a film to open its page, copy its name or delete it
@@ -45,11 +45,19 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 
 When you select a film, BoxdList shows its genres, runtime and synopsis. The data comes from [TMDB](https://www.themoviedb.org/).
 
-After you import a CSV, the app fetches the details of every film in the background and shows the progress at the top right. The details are saved in `data/details_cache.json` next to the app, so the next time they load without internet and only new films are fetched. Films that TMDB does not know are saved too, so they are not asked again. To start over, close the app and delete that file.
+After you import a CSV, the app fetches the details of every film in the background and shows the progress at the top right. The details are saved in `data/details_cache.json` next to the app, so the next time they load without internet and only new films are fetched. Films that TMDB does not know are saved too, so they are not asked again. To start over, close the app and delete that file. Details saved by older versions are fetched again once, to get the IMDb id.
 
 Letterboxd also lists TV series. For those, BoxdList shows the genres and the synopsis, but no runtime. Some entries may show "No details found", for example episodes or titles that TMDB lists with a different year.
 
 The app does not talk to TMDB directly. It asks a small proxy ([boxdlist-proxy](https://github.com/goncaloo07/boxdlist-proxy)), which keeps the TMDB API key private. Only the title and the year of the film are sent. Without an internet connection the app works as before: the details already saved are shown, and the panel says the others could not be loaded.
+
+## IMDb ratings
+
+The rating and the number of votes come from the [IMDb datasets](https://developer.imdb.com/non-commercial-datasets/). The proxy tells the app the IMDb id of each film (through TMDB), and the app looks that id up in IMDb's `title.ratings.tsv.gz` file.
+
+When the details are ready, BoxdList downloads that file (a few MB), keeps only the ratings of the films in your watchlist and deletes it, so the big file never stays on your computer. The ratings are saved in `data/ratings_cache.json` and downloaded again when they are 5 days old. To start over, close the app and delete that file.
+
+Films that have no IMDb id on TMDB, or no rating yet, are shown without one. Without an internet connection the saved ratings are still shown. The download sends nothing about your films.
 
 ## Getting your watchlist from Letterboxd
 
@@ -122,6 +130,8 @@ It asks if you want to push to GitHub, and then if you want to create a release.
 BoxdList is an independent project and is not affiliated with, endorsed by or connected to Letterboxd. Letterboxd is a trademark of its respective owner.
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
+
+Ratings come from the IMDb non-commercial datasets and are used for personal, non-commercial purposes only. Information courtesy of IMDb (https://www.imdb.com). BoxdList is not affiliated with or endorsed by IMDb. The MIT license covers the code only, not the IMDb data.
 
 ## License
 
