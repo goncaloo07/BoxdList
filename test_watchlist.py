@@ -425,6 +425,7 @@ def app(_window, monkeypatch):
     _window.ratings_file = None
     _window.status.config(text="")
     _window._status_job = None
+    _window.stop_pulse()
     return _window
     
 def test_warning_when_no_csv(app):
@@ -1854,11 +1855,12 @@ def test_clear_details_empties_everything(app):
     assert panel_texts(app) == ("", "", "")
 
 # ---------- on_select ----------
-def test_select_one_movie_shows_loading_and_starts_a_request(app, movies, monkeypatch):
+def test_select_one_movie_shows_skeleton_and_starts_a_request(app, movies, monkeypatch):
     started = fake_threads(monkeypatch)
     app.set_movies(movies)
     select_row(app, "0")
-    assert panel_texts(app) == ("Amélie (2001)", "", "Loading...")
+    assert panel_texts(app) == ("Amélie (2001)", "", "")
+    assert app.skeleton.winfo_manager() == "pack"   # the grey bars are on screen
     assert app.details_target is app.visible[0]
     assert len(started) == 1
     assert started[0].target == app._details_worker
@@ -1918,7 +1920,8 @@ def test_late_success_keeps_the_panel_but_is_cached(app, movies, monkeypatch):
     app.set_movies(movies)
     select_row(app, "1")   # the user is now looking at Blade Runner
     app._on_details_result(app.visible[0], DETAILS)   # Amélie answers late
-    assert panel_texts(app) == ("Blade Runner (1982)", "", "Loading...")
+    assert panel_texts(app) == ("Blade Runner (1982)", "", "")
+    assert app.skeleton.winfo_manager() == "pack"   # Blade Runner is still loading
     # the answer is not lost: selecting Amélie later is instant
     assert boxdlist.movie_key(app.visible[0]) in app.details_cache
 
@@ -1927,7 +1930,7 @@ def test_late_failure_does_not_touch_the_panel(app, movies, monkeypatch):
     app.set_movies(movies)
     select_row(app, "1")
     app._on_details_result(app.visible[0], None)
-    assert panel_texts(app) == ("Blade Runner (1982)", "", "Loading...")
+    assert panel_texts(app) == ("Blade Runner (1982)", "", "")
     assert app.details_cache == {}
 
 def test_result_with_nothing_selected_keeps_the_panel_empty(app, movies, monkeypatch):
@@ -2035,10 +2038,13 @@ def test_build_summary_with_details(movies):
                          ("", "meta"), ("", "overview"), ("", "overview"),
                          ("", "")]
 
-def test_build_summary_shows_loading_for_movies_in_progress(movies):
+def test_build_summary_shows_skeleton_for_movies_in_progress(movies):
     loading = {boxdlist.movie_key(movies[0])}
     lines = boxdlist.build_summary(movies[:1], 1, True, 30, {}, loading)
-    assert lines[3] == ("Loading...", "meta")
+    # 4 grey lines under the title, then a blank line: 6 lines in total
+    assert [style for _, style in lines[3:7]] == ["skeleton"] * 4
+    assert lines[3][0] == boxdlist.skeleton_line(30, 0.6)
+    assert len(lines) == boxdlist.SUMMARY_HEADER_LINES + boxdlist.DETAIL_LINES
 
 def test_build_summary_adds_a_more_line(movies):
     lines = boxdlist.build_summary(movies, 2, False, 30, {}, set())
@@ -2109,7 +2115,7 @@ def test_list_requests_details_once_per_movie(app, movies, monkeypatch):
     select_two(app)
     assert len(started) == 2
     assert len(app.details_inflight) == 2
-    assert "Loading..." in summary_text(app)
+    assert "█" in summary_text(app)
     app.render_summary()   # drawing again must not ask again
     assert len(started) == 2
 
@@ -2119,7 +2125,7 @@ def test_list_with_little_space_asks_for_nothing(app, movies, monkeypatch):
     app.set_movies(movies)
     select_two(app)
     assert started == []
-    assert "Loading..." not in summary_text(app)
+    assert "█" not in summary_text(app)
     assert "Amélie (2001)" in summary_text(app)
 
 def test_list_skips_movies_that_are_already_cached(app, movies, monkeypatch):
@@ -3195,12 +3201,13 @@ def test_ratings_arriving_refresh_the_open_panel(app, movies, monkeypatch):
     assert panel_texts(app) == ("Amélie (2001)", "Comedy · 2h 02min", "A story.")
     assert app.details_rating.cget("text") == "★ 8.2/10 (850k votes)"
 
-def test_ratings_arriving_do_not_replace_the_loading_message(app, movies, monkeypatch):
+def test_ratings_arriving_do_not_replace_the_skeleton(app, movies, monkeypatch):
     fake_threads(monkeypatch)
     app.set_movies(movies)
-    select_row(app, "0")   # no details in the cache, so it shows "Loading..."
+    select_row(app, "0")   # no details in the cache, so the skeleton shows
     app._on_ratings_result({"tt0000001": (8.2, 850628)})
-    assert panel_texts(app) == ("Amélie (2001)", "", "Loading...")
+    assert panel_texts(app) == ("Amélie (2001)", "", "")
+    assert app.skeleton.winfo_manager() == "pack"
 
 def test_ratings_arriving_do_not_replace_the_error_message(app, movies, monkeypatch):
     fake_threads(monkeypatch)
@@ -3420,3 +3427,304 @@ def test_discard_ratings_file_without_a_file_does_nothing(app):
     app.ratings_file = None
     app.discard_ratings_file()   # must not raise
     assert app.ratings_file is None
+    
+# ---------- mix_colors and skeleton_line ----------
+@pytest.mark.parametrize("t, expected", [
+    (0, "#000000"),
+    (1, "#ffffff"),
+    (0.5, "#808080"),   # 127.5 rounds to 128
+])
+def test_mix_colors(t, expected):
+    assert boxdlist.mix_colors("#000000", "#ffffff", t) == expected
+
+def test_mix_colors_keeps_two_digits_per_channel():
+    # small values need a leading zero, like #0a
+    assert boxdlist.mix_colors("#000000", "#0a0a0a", 1) == "#0a0a0a"
+
+@pytest.mark.parametrize("width, fraction, expected", [
+    (10, 0.5, 5),     # half of the line
+    (10, 1.0, 10),    # the full line
+    (10, 0.05, 1),    # never empty, at least one block
+    (25, 0.35, 8),    # int() rounds down: 8.75 gives 8
+])
+def test_skeleton_line_length(width, fraction, expected):
+    assert boxdlist.skeleton_line(width, fraction) == "█" * expected
+
+# ---------- rating line in build_summary ----------
+def summary_cache(movie_item, **extra):
+    # up to date details (with an imdb id) for one movie
+    return {boxdlist.movie_key(movie_item):
+            {**WITH_ID, "overview": "A story.", **extra}}
+
+def test_build_summary_rating_bar_while_ratings_are_pending(movies):
+    cache = summary_cache(movies[0])
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set(), {}, True)
+    assert lines[4] == (boxdlist.skeleton_line(30, 0.35), "skeleton")
+    assert len(lines) == boxdlist.SUMMARY_HEADER_LINES + boxdlist.DETAIL_LINES
+
+def test_build_summary_no_rating_bar_when_ratings_are_not_pending(movies):
+    cache = summary_cache(movies[0])
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set(), {}, False)
+    assert lines[4] == ("", "meta")
+
+def test_build_summary_real_rating_wins_over_the_bar(movies):
+    cache = summary_cache(movies[0])
+    ratings = {"tt0000001": (8.2, 850628)}
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set(), ratings, True)
+    assert lines[4] == ("★ 8.2/10 (850k votes)", "meta")
+
+def test_build_summary_no_rating_bar_without_imdb_id(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"genres": ["Comedy"], "imdb_id": None}}
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set(), {}, True)
+    assert lines[4] == ("", "meta")
+
+def test_build_summary_no_rating_bar_for_not_found(movies):
+    cache = {boxdlist.movie_key(movies[0]): dict(boxdlist.NOT_FOUND)}
+    lines = boxdlist.build_summary(movies[:1], 1, True, 30, cache, set(), {}, True)
+    assert lines[4] == ("", "meta")
+
+# ---------- ratings_pending ----------
+def test_ratings_pending_is_false_at_the_start(app):
+    assert app.ratings_pending() is False
+
+@pytest.mark.parametrize("attribute, value", [
+    ("ratings_downloading", True),
+    ("ratings_loading", True),
+    ("ratings_file", Path("r.tsv.gz")),
+])
+def test_ratings_pending_is_true_while_ratings_are_on_their_way(app, attribute, value):
+    setattr(app, attribute, value)
+    assert app.ratings_pending() is True
+
+# ---------- skeleton in the panel ----------
+def test_details_arriving_hide_the_skeleton(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    assert app.skeleton.winfo_manager() == "pack"
+    app._on_details_result(app.visible[0], DETAILS)
+    assert app.skeleton.winfo_manager() == ""
+
+def test_cached_movie_shows_no_skeleton(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(app.visible[0])] = DETAILS
+    select_row(app, "0")
+    assert app.skeleton.winfo_manager() == ""
+
+def test_failed_details_hide_the_skeleton(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], None)
+    assert app.skeleton.winfo_manager() == ""
+    assert panel_texts(app)[2] == "Could not load details."
+
+def test_deselecting_hides_the_skeleton(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app.clear_selection()
+    app.on_select()
+    assert app.skeleton.winfo_manager() == ""
+
+# ---------- rating bar in the panel ----------
+def test_rating_bar_replaces_the_rating_label_while_ratings_are_pending(
+        app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    app.ratings_downloading = True
+    select_row(app, "0")
+    assert app.rating_bar.winfo_manager() == "pack"
+    assert app.details_rating.winfo_manager() == ""
+
+def test_no_rating_bar_when_ratings_are_not_pending(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    select_row(app, "0")
+    assert app.rating_bar.winfo_manager() == ""
+    assert app.details_rating.winfo_manager() == "pack"
+
+def test_no_rating_bar_without_imdb_id(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(app.visible[0])] = {
+        "genres": ["Comedy"], "imdb_id": None}   # TMDB has no id
+    app.ratings_downloading = True
+    select_row(app, "0")
+    assert app.rating_bar.winfo_manager() == ""
+
+def test_rating_arriving_swaps_the_bar_for_the_label(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    app.ratings_loading = True
+    select_row(app, "0")
+    assert app.rating_bar.winfo_manager() == "pack"
+    app._on_ratings_result({"tt0000001": (8.2, 850628)})
+    assert app.rating_bar.winfo_manager() == ""
+    assert app.details_rating.winfo_manager() == "pack"
+    assert app.details_rating.cget("text") == "★ 8.2/10 (850k votes)"
+
+def test_failed_ratings_remove_the_rating_bar(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    app.ratings_loading = True
+    select_row(app, "0")
+    app._on_ratings_result(None)   # the read failed, nothing is coming
+    assert app.rating_bar.winfo_manager() == ""
+    assert app.details_rating.winfo_manager() == "pack"
+
+def test_failed_ratings_download_removes_the_rating_bar(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    app.ratings_downloading = True
+    select_row(app, "0")
+    app._on_ratings_downloaded(None)
+    assert app.rating_bar.winfo_manager() == ""
+
+def test_a_new_selection_puts_the_rating_label_back(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    app.ratings_downloading = True
+    select_row(app, "0")                  # the bar is showing
+    app.details_cache[boxdlist.movie_key(app.visible[1])] = {**WITH_ID, "imdb_id": None}
+    select_row(app, "1")                  # a movie that never gets a rating
+    assert app.rating_bar.winfo_manager() == ""
+    assert app.details_rating.winfo_manager() == "pack"
+
+# ---------- skeleton in the list ----------
+def test_list_shows_rating_bars_while_ratings_are_pending(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40, width=30)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    cached_with_id(app, app.visible[1])
+    app.ratings_downloading = True
+    select_two(app)
+    # both movies have details, so the only bars are the rating ones (10 blocks)
+    assert "█" * 10 in summary_text(app)
+    assert "█" * 11 not in summary_text(app)
+
+def test_ratings_arriving_remove_the_rating_bars_from_the_list(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40, width=30)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    cached_with_id(app, app.visible[1])
+    app.ratings_loading = True
+    select_two(app)
+    app._on_ratings_result({"tt0000001": (8.2, 850628)})
+    assert "█" not in summary_text(app)
+    assert "★ 8.2/10 (850k votes)" in summary_text(app)
+
+def test_failed_ratings_remove_the_rating_bars_from_the_list(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40, width=30)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    cached_with_id(app, app.visible[1])
+    app.ratings_loading = True
+    select_two(app)
+    assert "█" in summary_text(app)
+    app._on_ratings_result(None)
+    assert "█" not in summary_text(app)
+
+def test_details_arriving_replace_the_list_bars(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40, width=30)
+    app.set_movies(movies)
+    select_two(app)
+    assert "█" in summary_text(app)
+    app._on_details_result(app.visible[0], DETAILS)
+    app._on_details_result(app.visible[1], DETAILS)
+    assert "█" not in summary_text(app)
+
+# ---------- pulse ----------
+def test_skeleton_starts_the_pulse(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    assert app._pulse_job is not None
+
+def test_cached_movie_does_not_start_the_pulse(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(app.visible[0])] = DETAILS
+    select_row(app, "0")
+    assert app._pulse_job is None
+
+def test_details_arriving_stop_the_pulse(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], DETAILS)
+    assert app._pulse_job is None
+
+def test_deselecting_stops_the_pulse(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app.clear_selection()
+    app.on_select()
+    assert app._pulse_job is None
+
+def test_rating_bar_starts_the_pulse(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    cached_with_id(app, app.visible[0])
+    app.ratings_downloading = True
+    select_row(app, "0")
+    assert app._pulse_job is not None
+
+def test_list_with_bars_starts_the_pulse(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40)
+    app.set_movies(movies)
+    select_two(app)
+    assert app._pulse_job is not None
+
+def test_list_with_names_only_does_not_pulse(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=6)   # names only, so no bars
+    app.set_movies(movies)
+    select_two(app)
+    assert app._pulse_job is None
+
+def test_start_pulse_twice_keeps_one_timer(app):
+    app.start_pulse()
+    first = app._pulse_job
+    app.start_pulse()
+    assert app._pulse_job == first   # a second timer would have a new id
+
+def test_stop_pulse_without_a_timer_does_not_crash(app):
+    app.stop_pulse()
+    assert app._pulse_job is None
+
+def test_pulse_tick_changes_the_bar_color(app):
+    # one step before the lightest point of the cycle
+    app._pulse_phase = 0.5 - boxdlist.PULSE_MS / boxdlist.PULSE_CYCLE_MS
+    app._pulse_tick()
+    assert app.skeleton_bars[0].cget("bg").lower() == boxdlist.SCROLL.lower()
+    assert app._pulse_job is not None   # the next tick is already scheduled
+
+def test_stop_pulse_resets_the_color_and_the_phase(app):
+    app._pulse_phase = 0.4
+    app._pulse_tick()
+    app.stop_pulse()
+    assert app._pulse_phase == 0.0
+    assert app.skeleton_bars[0].cget("bg").lower() == boxdlist.ROW_ALT.lower()
+    assert app._pulse_job is None
+
+def test_on_close_stops_the_pulse(app, monkeypatch):
+    monkeypatch.setattr(boxdlist, "read_config", lambda: {})
+    monkeypatch.setattr(boxdlist, "write_config", lambda data: None)
+    monkeypatch.setattr(app, "destroy", lambda: None)
+    app.start_pulse()
+    app.on_close()
+    assert app._pulse_job is None

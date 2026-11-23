@@ -26,6 +26,7 @@ from datetime import date, timedelta
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
 import gzip
+import math
   
 def app_folder() -> Path:
     """Folder of the .exe when frozen, or of this file when running the code."""
@@ -49,7 +50,7 @@ DETAILS_WIDTH = 260
 DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.0.19"
+APP_VERSION = "1.1.0"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
@@ -65,6 +66,8 @@ NOT_FOUND = {"not_found": True}
 RATINGS_URL = "https://datasets.imdbws.com/title.ratings.tsv.gz"    
 RATINGS_CACHE_FILE = app_folder() / "data" / "ratings_cache.json"
 RATINGS_MAX_AGE_DAYS = 5
+PULSE_MS = 40          # time between small color steps of the skeleton bars
+PULSE_CYCLE_MS = 1200  # time for one full pulse (dark, light, dark)
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -530,12 +533,25 @@ def plan_summary(total: int, lines: int) -> tuple[bool, int]:
         return False, total
     return False, max(usable - 1, 0)
 
+def skeleton_line(width: int, fraction: float) -> str:
+    """A bar of block characters that fills part of the line."""
+    # int() rounds down, so the bar is never wider than the line
+    return "█" * max(1, int(width * fraction))
+
+def mix_colors(start: str, end: str, t: float) -> str:
+    """Blends two '#RRGGBB' colors. t=0 gives start, t=1 gives end."""
+    a = [int(start[i:i + 2], 16) for i in (1, 3, 5)]   # red, green, blue
+    b = [int(end[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}"
+                        for x, y in zip(a, b))
 
 def build_summary(movies, shown, with_details, width, cache, loading,
-                  ratings: dict | None = None) -> list[tuple[str, str]]:
+                  ratings: dict | None = None,
+                  ratings_pending: bool = False) -> list[tuple[str, str]]:
     """Lines of the multi-selection list, as (text, style) pairs.
     'width' is how many characters fit in one line. 'cache' holds the
     details we already have and 'loading' the movies being requested.
+    'ratings_pending' is True while the IMDb ratings are still on their way.
     """
     lines = [(f"{len(movies)} movies selected", "header"), ("", "")]
     for movie in movies[:shown]:
@@ -546,17 +562,27 @@ def build_summary(movies, shown, with_details, width, cache, loading,
             continue
         key = movie_key(movie)
         details = cache.get(key)
-        rating = ""
+        if not details and key in loading:
+            # same 4 lines the real details use, so the list does not jump
+            for fraction in (0.6, 0.35, 0.95, 0.7):
+                lines.append((skeleton_line(width, fraction), "skeleton"))
+            lines.append(("", ""))
+            continue
+        meta = ""
+        rating_text, rating_style = "", "meta"
         if details:
             meta = details_line(details)   # genres and runtime only
             rating = rating_line(details, ratings or {})
-        elif key in loading:
-            meta = "Loading..."
-        else:
-            meta = ""
+            has_id = isinstance(details.get("imdb_id"), str)
+            if has_id and not rating and ratings_pending:
+                # details are here, only the rating is missing
+                rating_text, rating_style = skeleton_line(width, 0.35), "skeleton"
+            else:
+                rating_text = rating
         lines.append((textwrap.shorten(meta, width, placeholder="..."), "meta"))
         # always one line, even when empty, so the list does not jump
-        lines.append((textwrap.shorten(rating, width, placeholder="..."), "meta"))
+        lines.append((textwrap.shorten(rating_text, width, placeholder="..."),
+                      rating_style))
         overview = details.get("overview") if details else None
         text = overview.strip() if isinstance(overview, str) else ""
         wrapped = (textwrap.wrap(text, width, max_lines=2, placeholder="...")
@@ -864,6 +890,23 @@ class App(TkinterDnD.Tk):
         self.details_overview = ttk.Label(self.single_view, text="", wraplength=wrap,
                                           justify="left")
         self.details_overview.pack(anchor="w", pady=(self.px(10), 0))
+        
+        # Skeleton: grey bars that stand in for the text while it loads
+        self.skeleton = ttk.Frame(self.single_view)
+        self.skeleton_bars = []
+        for width, height in ((140, 10), (100, 10), (230, 10), (200, 10)):
+            # a Frame with a fixed size and a background color looks like a bar
+            bar = tk.Frame(self.skeleton, width=self.px(width),
+                        height=self.px(height), bg=ROW_ALT)
+            bar.pack(anchor="w", pady=(self.px(6), 0))
+            self.skeleton_bars.append(bar)   # saved, so we can change their color later
+            
+        # Single bar for the rating line, used when only the rating is missing
+        self.rating_bar = tk.Frame(self.single_view, width=self.px(100),
+                                height=self.px(10), bg=ROW_ALT)
+        
+        self._pulse_job = None      # pending after() ID, None when not pulsing
+        self._pulse_phase = 0.0   # position in the pulse cycle, from 0 to 1
 
         # Several movies selected: a list that adapts to the space it has.
         # Every line is cut by hand (wrap="none"), so we know how many lines it uses.
@@ -878,6 +921,8 @@ class App(TkinterDnD.Tk):
         self.summary.bind("<Button-1>", lambda _: "break")   # no focus, no selection
         # a bigger or smaller window changes how much fits
         self.summary.bind("<Configure>", lambda _: self.render_summary())
+        # grey blocks that stand in for text while it loads
+        self.summary.tag_configure("skeleton", foreground=ROW_ALT)
         
         self.scrollbar.pack(side="right", fill="y", padx=(self.px(4), 0))
         self.table.pack(side="left", fill="both", expand=True)
@@ -1509,27 +1554,87 @@ class App(TkinterDnD.Tk):
         
     def show_details(self, movie: dict, details: dict | None) -> None:
         """Fills the panel. 'details' is None if the lookup failed."""
+        self.hide_skeleton()   # also puts the rating label back in place
         year = f" ({movie['year']})" if movie["year"] else ""
         self.details_title.config(text=movie["name"] + year)
         # the line functions cannot take None, so decide first
         self.details_meta.config(text=details_line(details) if details else "")
-        self.details_rating.config(
-            text=rating_line(details, self.ratings) if details else "")
+        rating = rating_line(details, self.ratings) if details else ""
+        self.details_rating.config(text=rating)
         overview = details.get("overview") if details else None
         if is_not_found(details):
             overview = "No details found for this movie."
         elif not isinstance(overview, str) or not overview.strip():
             overview = "No synopsis available."
         self.details_overview.config(text=overview.strip())
+        # only when the film has an id, no rating yet, and ratings are on their way
+        has_id = bool(details) and isinstance(details.get("imdb_id"), str)
+        if has_id and not rating and self.ratings_pending():
+            # the bar takes the place of the empty rating label
+            self.details_rating.pack_forget()
+            self.rating_bar.pack(anchor="w", pady=(self.px(6), self.px(2)),
+                                before=self.details_overview)
+            self.start_pulse()
         
     def show_message(self, movie: dict, text: str) -> None:
         """Shows the title and one line of text, like 'Loading...'."""
+        self.hide_skeleton()
         year = f" ({movie['year']})" if movie["year"] else ""
         self.details_title.config(text=movie["name"] + year)
         self.details_meta.config(text="")   # clear the old genres and runtime
         self.details_rating.config(text="")   # and the old rating
         self.details_overview.config(text=text)
         
+    def show_skeleton(self, movie: dict) -> None:
+        """Shows the title and grey bars while the details load."""
+        # show_message sets the title and empties the texts (it also hides old bars)
+        self.show_message(movie, "")
+        # before details_meta, so the bars sit right under the title
+        self.skeleton.pack(anchor="w", before=self.details_meta)
+        self.start_pulse()
+
+    def hide_skeleton(self) -> None:
+        """Hides the skeleton loading"""
+        self.skeleton.pack_forget()
+        self.rating_bar.pack_forget()
+        self.stop_pulse()
+        # the rating label may have been taken off the screen by the bar
+        if self.details_rating.winfo_manager() != "pack":
+            self.details_rating.pack(anchor="w", pady=(self.px(2), 0),
+                                    before=self.details_overview)
+    
+    def start_pulse(self) -> None:
+        """Starts the pulsing, unless it is already running."""
+        if self._pulse_job is None:
+            self._pulse_job = self.after(PULSE_MS, self._pulse_tick)
+
+    def stop_pulse(self) -> None:
+        """Stops the timer and puts the bars back to their normal color."""
+        if self._pulse_job is not None:
+            self.after_cancel(self._pulse_job)
+            self._pulse_job = None
+        self._pulse_phase = 0.0
+        self._paint_skeleton(ROW_ALT)
+
+    def _pulse_tick(self) -> None:
+        # move a small step forward in the cycle, and wrap around at 1
+        self._pulse_phase = (self._pulse_phase + PULSE_MS / PULSE_CYCLE_MS) % 1.0
+        # cosine gives 0 -> 1 -> 0, slow at both ends, so it looks like breathing
+        t = (1 - math.cos(self._pulse_phase * 2 * math.pi)) / 2
+        self._paint_skeleton(mix_colors(ROW_ALT, SCROLL, t))
+        self._pulse_job = self.after(PULSE_MS, self._pulse_tick)
+
+    def _paint_skeleton(self, color: str) -> None:
+        """Colors the bars of the panel and the blocks of the list."""
+        for bar in (*self.skeleton_bars, self.rating_bar):
+            bar.config(bg=color)
+        self.summary.tag_configure("skeleton", foreground=color)
+
+    def ratings_pending(self) -> bool:
+        """True while the ratings are downloading, loading or waiting to be read."""
+        return (self.ratings_downloading or self.ratings_loading
+                or self.ratings_file is not None)
+    
     def on_select(self) -> None:
         """Runs whenever the selection changes."""
         self.update_counter()
@@ -1560,12 +1665,13 @@ class App(TkinterDnD.Tk):
         if cached:
             self.show_details(movie, cached)   # no network needed
             return
-        self.show_message(movie, "Loading...")
+        self.show_skeleton(movie)
         threading.Thread(target=self._details_worker, args=(movie,),
                          daemon=True).start()
 
     def clear_details(self) -> None:
         """Empties the panel (nothing selected)."""
+        self.hide_skeleton()
         for label in (self.details_title, self.details_meta,
                       self.details_rating, self.details_overview):
             label.config(text="")
@@ -1664,6 +1770,7 @@ class App(TkinterDnD.Tk):
         self.ratings_downloading = False
         if path is None:
             self.show_status("Could not download ratings")
+            self.refresh_after_ratings()
             return
         self.ratings_file = path
         # only read it when every film has its details (and so its imdb id)
@@ -1710,11 +1817,17 @@ class App(TkinterDnD.Tk):
         self.ratings_loading = False
         if ratings is None:
             self.show_status("Could not load ratings")
+            # the rating bars must go away, because nothing else is coming
+            self.refresh_after_ratings()
             return
         self.ratings = ratings
         self.ratings_updated = date.today()
         write_ratings_cache(self.ratings, self.ratings_updated)
         self.show_status("Ratings ready")
+        self.refresh_after_ratings()
+            
+    def refresh_after_ratings(self) -> None:
+        """Redraws the panel or the list, so the rating bars match the new state."""
         if self.summary_movies:
             self.render_summary()   # several movies selected: refresh the list
             return
@@ -1736,8 +1849,14 @@ class App(TkinterDnD.Tk):
             # only the movies that are shown need their details
             self.request_missing_details(self.summary_movies[:shown])
         lines = build_summary(self.summary_movies, shown, with_details,
-                              self.summary_width(), self.details_cache,
-                              self.details_inflight, self.ratings)
+                    self.summary_width(), self.details_cache,
+                    self.details_inflight, self.ratings,
+                    self.ratings_pending())
+        # pulse only while at least one skeleton line is on the screen
+        if any(style == "skeleton" for _, style in lines):
+            self.start_pulse()
+        else:
+            self.stop_pulse()
         self.summary.config(state="normal")   # a disabled Text cannot be changed
         self.summary.delete("1.0", "end")
         for text, style in lines:
@@ -1850,6 +1969,7 @@ class App(TkinterDnD.Tk):
             # whatever fails above, the window must close
             self.discard_ratings_file()
             self.executor.shutdown(wait=False, cancel_futures=True)
+            self.stop_pulse()
             self.destroy()
 
 if __name__ == "__main__":
