@@ -50,7 +50,7 @@ DETAILS_WIDTH = 260
 DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
@@ -66,6 +66,7 @@ NOT_FOUND = {"not_found": True}
 RATINGS_URL = "https://datasets.imdbws.com/title.ratings.tsv.gz"    
 RATINGS_CACHE_FILE = app_folder() / "data" / "ratings_cache.json"
 RATINGS_MAX_AGE_DAYS = 5
+NOT_FOUND_RETRY_DAYS = 5   # ask TMDB again about unknown films after this many days
 PULSE_MS = 40          # time between small color steps of the skeleton bars
 PULSE_CYCLE_MS = 1200  # time for one full pulse (dark, light, dark)
 
@@ -367,6 +368,22 @@ def details_outdated(details: dict) -> bool:
         return False
     return "imdb_id" not in details    
 
+def not_found_expired(details: dict, today: date) -> bool:
+    """True for an old 'not found' marker, or one saved without a date by an older version."""
+    if not is_not_found(details):
+        return False
+    try:
+        checked = date.fromisoformat(details.get("checked", ""))
+    except (ValueError, TypeError):
+        return True   # no date or a broken one: ask again
+    # a date in the future (the PC clock changed) counts as expired too
+    return checked > today or (today - checked).days >= NOT_FOUND_RETRY_DAYS
+
+def drop_expired_not_found(cache: dict, today: date) -> dict:
+    """Returns a copy of the cache without the 'not found' markers that are due again."""
+    return {key: details for key, details in cache.items()
+            if not not_found_expired(details, today)}
+
 def movies_to_fetch(movies: list[dict], cache: dict, skip: set) -> list[dict]:
     """Movies that still need details, one per name+year."""
     seen = set()
@@ -515,6 +532,23 @@ def ratings_need_update(updated: date | None, today: date) -> bool:
     """True if the saved ratings are missing or too old."""
     return (updated is None or updated > today
             or (today - updated).days >= RATINGS_MAX_AGE_DAYS)
+
+def ratings_need_refresh(updated: date | None, today: date,
+                         wanted: set[str], ratings: dict) -> bool:
+    """True if the ratings are too old, or a film in the list was never looked up."""
+    if ratings_need_update(updated, today):
+        return True
+    return any(imdb_id not in ratings for imdb_id in wanted)
+
+def with_unrated_marks(ratings: dict, wanted: set[str]) -> dict:
+    """Adds (0.0, 0) for every wanted id that has no IMDb rating.
+    That way the id counts as looked up and does not trigger another download.
+    format_rating shows nothing for it, so the film still has no rating on screen.
+    """
+    marked = dict(ratings)
+    for imdb_id in wanted:
+        marked.setdefault(imdb_id, (0.0, 0))
+    return marked
 
 def plan_summary(total: int, lines: int) -> tuple[bool, int]:
     """Decides how the list of selected movies looks.
@@ -751,7 +785,7 @@ class App(TkinterDnD.Tk):
         self._search_job = None          # pending after() ID (debounce)
         self.downloading = False   # True while the installer is being downloaded
         self.last_deleted: list[tuple[dict, int]] | None = None
-        self.details_cache: dict[tuple[str, str], dict] = read_details_cache()   # movie_key -> details that worked
+        self.details_cache: dict[tuple[str, str], dict] = drop_expired_not_found(read_details_cache(), date.today())   # movie_key -> details that worked
         self.details_target: dict | None = None   # the movie the panel is waiting for
         self.summary_movies: list[dict] = []   # the selected movies, when there are several
         self.details_inflight: set[tuple[str, str]] = set()   # requests in progress
@@ -1269,6 +1303,9 @@ class App(TkinterDnD.Tk):
         key = movie_key(movie)
         self.details_inflight.discard(key)
         if details:
+            if is_not_found(details):
+                # remember the day, so it is asked again after some time
+                details = {**details, "checked": date.today().isoformat()}
             self.details_cache[key] = details   # only successes are saved
         else:
             self.details_failed.add(key)   # so the list does not ask again and again
@@ -1746,11 +1783,11 @@ class App(TkinterDnD.Tk):
         else:
             self.show_status(f"Details {self.prefetch_done}/{self.prefetch_total}")
             
-    def start_ratings_download(self) -> None:
+    def start_ratings_download(self, force: bool = False) -> None:
         """Starts downloading the ratings file, if it is needed and not started yet."""
         if self.ratings_downloading or self.ratings_file is not None:
             return   # already on its way, or already here
-        if not ratings_need_update(self.ratings_updated, date.today()):
+        if not force and not ratings_need_update(self.ratings_updated, date.today()):
             return   # the saved ratings are still fresh
         self.ratings_downloading = True   # set it before the thread starts
         threading.Thread(target=self._download_ratings_worker, daemon=True).start()
@@ -1792,10 +1829,11 @@ class App(TkinterDnD.Tk):
         if self.ratings_loading:
             return   # a read is already running
         wanted = wanted_imdb_ids(self.movies, self.details_cache)
-        if not wanted or not ratings_need_update(self.ratings_updated, date.today()):
+        if not wanted or not ratings_need_refresh(self.ratings_updated, date.today(),
+                                                  wanted, self.ratings):
             self.discard_ratings_file()   # nothing to look up, so the file is not needed
             return
-        self.start_ratings_download()   # does nothing if it already started
+        self.start_ratings_download(force=True)   # does nothing if it already started
         if self.ratings_file is None:
             self.show_status("Downloading ratings...", keep=True)
             return   # _on_ratings_downloaded calls this method again
@@ -1807,6 +1845,9 @@ class App(TkinterDnD.Tk):
     def _read_ratings_worker(self, wanted: set[str], path: Path) -> None:
         """Reads the downloaded ratings file. Runs in a background thread."""
         ratings = read_downloaded_ratings(path, wanted)
+        if ratings is not None:
+            # films with no IMDb rating get (0.0, 0), so they count as looked up
+            ratings = with_unrated_marks(ratings, wanted)
         try:
             self.after(0, self._on_ratings_result, ratings)
         except (RuntimeError, tk.TclError):
