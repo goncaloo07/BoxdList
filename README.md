@@ -45,7 +45,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 
 When you select a film, BoxdList shows its genres, runtime and synopsis. The data comes from [TMDB](https://www.themoviedb.org/).
 
-After you import a CSV, the app fetches the details of every film in the background and shows the progress at the top right. The details are saved in `data/details_cache.json` next to the app, so the next time they load without internet and only new films are fetched. Films that TMDB does not know are saved too, so they are not asked again. To start over, close the app and delete that file. Details saved by older versions are fetched again once, to get the IMDb id.
+After you import a CSV, the app fetches the details of every film in the background and shows the progress at the top right. The details are saved in `data/details_cache.json` next to the app, so the next time they load without internet and only new films are fetched. Films that TMDB does not know are saved too, and asked again after 30 days (and once when you update the app), in case TMDB adds them later. To start over, close the app and delete that file. Details saved by older versions are fetched again once, to get the IMDb id.
 
 Letterboxd also lists TV series. For those, BoxdList shows the genres and the synopsis, but no runtime. Some entries may show "No details found", for example episodes or titles that TMDB lists with a different year.
 
@@ -55,7 +55,7 @@ The app does not talk to TMDB directly. It asks a small proxy ([boxdlist-proxy](
 
 The rating and the number of votes come from the [IMDb datasets](https://developer.imdb.com/non-commercial-datasets/). The proxy tells the app the IMDb id of each film (through TMDB), and the app looks that id up in IMDb's `title.ratings.tsv.gz` file.
 
-When the details are ready, BoxdList downloads that file (a few MB), keeps only the ratings of the films in your watchlist and deletes it, so the big file never stays on your computer. The ratings are saved in `data/ratings_cache.json` and downloaded again when they are 5 days old. To start over, close the app and delete that file.
+When the details are ready, BoxdList downloads that file (a few MB), keeps only the ratings of the films in your watchlist and deletes it, so the big file never stays on your computer. The ratings are saved in `data/ratings_cache.json` and downloaded again when they are 5 days old, or when your list has films that were never looked up. To start over, close the app and delete that file.
 
 Films that have no IMDb id on TMDB, or no rating yet, are shown without one. Without an internet connection the saved ratings are still shown. The download sends nothing about your films.
 

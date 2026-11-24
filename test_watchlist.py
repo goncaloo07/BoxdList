@@ -2891,6 +2891,7 @@ def test_update_ratings_skips_fresh_ratings(app, movies, monkeypatch):
     started = fake_threads(monkeypatch)
     ratings_ready_app(app, movies)
     app.ratings_updated = date.today()
+    app.ratings = {"tt0000001": (8.2, 100)}   # this film was already looked up
     app.update_ratings()
     assert started == []
     assert app.ratings_downloading is False
@@ -2899,6 +2900,7 @@ def test_update_ratings_skips_fresh_ratings(app, movies, monkeypatch):
 def test_update_ratings_with_fresh_ratings_deletes_a_leftover_file(app, movies, tmp_path):
     ratings_ready_app(app, movies)
     app.ratings_updated = date.today()
+    app.ratings = {"tt0000001": (8.2, 100)}   # this film was already looked up
     leftover = tmp_path / "r.tsv.gz"
     leftover.write_bytes(GOOD_GZ)
     app.ratings_file = leftover
@@ -3728,3 +3730,133 @@ def test_on_close_stops_the_pulse(app, monkeypatch):
     app.start_pulse()
     app.on_close()
     assert app._pulse_job is None
+
+# ---------- "not found" markers expire ----------
+TODAY_NF = date(2026, 11, 24)
+
+def stamped(day):
+    # a "not found" marker like the app saves it now
+    return {"not_found": True, "checked": day.isoformat()}
+
+def test_not_found_without_a_date_is_expired():
+    # saved by an older version, so it is asked again once
+    assert boxdlist.not_found_expired(dict(boxdlist.NOT_FOUND), TODAY_NF) is True
+
+def test_not_found_checked_recently_is_not_expired():
+    assert boxdlist.not_found_expired(stamped(TODAY_NF - timedelta(days=5)), TODAY_NF) is False
+
+def test_not_found_one_day_before_the_limit_is_not_expired():
+    day = TODAY_NF - timedelta(days=boxdlist.NOT_FOUND_RETRY_DAYS - 1)
+    assert boxdlist.not_found_expired(stamped(day), TODAY_NF) is False
+
+def test_not_found_expires_at_the_limit():
+    day = TODAY_NF - timedelta(days=boxdlist.NOT_FOUND_RETRY_DAYS)
+    assert boxdlist.not_found_expired(stamped(day), TODAY_NF) is True
+
+def test_not_found_with_a_future_date_is_expired():
+    # the PC clock may have been changed
+    assert boxdlist.not_found_expired(stamped(TODAY_NF + timedelta(days=3)), TODAY_NF) is True
+
+@pytest.mark.parametrize("checked", ["banana", "", None, 5])
+def test_not_found_with_a_broken_date_is_expired(checked):
+    assert boxdlist.not_found_expired({"not_found": True, "checked": checked}, TODAY_NF) is True
+
+def test_details_that_were_found_never_expire():
+    assert boxdlist.not_found_expired({"imdb_id": "tt1"}, TODAY_NF) is False
+    assert boxdlist.not_found_expired({}, TODAY_NF) is False
+
+def test_drop_expired_not_found_keeps_everything_else():
+    found = {"imdb_id": "tt1"}
+    recent = stamped(TODAY_NF - timedelta(days=2))
+    cache = {("A", "2000"): found,
+             ("B", "2001"): dict(boxdlist.NOT_FOUND),   # no date: dropped
+             ("C", "2002"): recent}
+    assert boxdlist.drop_expired_not_found(cache, TODAY_NF) == {
+        ("A", "2000"): found, ("C", "2002"): recent}
+
+def test_drop_expired_not_found_does_not_change_the_original():
+    cache = {("B", "2001"): dict(boxdlist.NOT_FOUND)}
+    boxdlist.drop_expired_not_found(cache, TODAY_NF)
+    assert len(cache) == 1
+
+def test_not_found_result_is_stamped_with_today(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], dict(boxdlist.NOT_FOUND))
+    saved = app.details_cache[boxdlist.movie_key(app.visible[0])]
+    assert saved == {"not_found": True, "checked": date.today().isoformat()}
+    assert boxdlist.NOT_FOUND == {"not_found": True}   # the constant stays clean
+
+def test_prefetch_skips_a_recent_not_found(app, movies):
+    app.set_movies(movies)
+    app.details_cache[boxdlist.movie_key(movies[0])] = stamped(date.today())
+    app.prefetch_details()
+    assert "Amélie" not in names(submitted_movies(app))
+
+# ---------- ratings are looked up again for new films ----------
+def test_ratings_need_refresh_when_the_ratings_are_old():
+    assert boxdlist.ratings_need_refresh(None, TODAY_RATINGS, set(), {}) is True
+
+def test_ratings_do_not_need_refresh_when_fresh_and_every_film_was_looked_up():
+    ratings = {"tt1": (8.0, 10)}
+    assert boxdlist.ratings_need_refresh(TODAY_RATINGS, TODAY_RATINGS, {"tt1"}, ratings) is False
+
+def test_ratings_need_refresh_when_fresh_but_a_film_is_new():
+    ratings = {"tt1": (8.0, 10)}
+    assert boxdlist.ratings_need_refresh(
+        TODAY_RATINGS, TODAY_RATINGS, {"tt1", "tt2"}, ratings) is True
+
+def test_ratings_of_films_that_are_gone_do_not_trigger_a_refresh():
+    ratings = {"tt1": (8.0, 10), "tt9": (7.0, 5)}   # tt9 left the list
+    assert boxdlist.ratings_need_refresh(TODAY_RATINGS, TODAY_RATINGS, {"tt1"}, ratings) is False
+
+def test_with_unrated_marks_adds_a_zero_rating_for_missing_ids():
+    result = boxdlist.with_unrated_marks({"tt1": (8.3, 10)}, {"tt1", "tt2"})
+    assert result == {"tt1": (8.3, 10), "tt2": (0.0, 0)}
+
+def test_with_unrated_marks_does_not_change_the_original():
+    original = {"tt1": (8.3, 10)}
+    boxdlist.with_unrated_marks(original, {"tt2"})
+    assert original == {"tt1": (8.3, 10)}
+
+def test_unrated_mark_shows_no_rating():
+    assert boxdlist.rating_line({"imdb_id": "tt2"}, {"tt2": (0.0, 0)}) == ""
+
+def test_unrated_mark_survives_the_ratings_file(tmp_path, monkeypatch):
+    ratings_cache_file(tmp_path, monkeypatch)
+    boxdlist.write_ratings_cache({"tt2": (0.0, 0)}, date(2026, 11, 20))
+    assert boxdlist.read_ratings_cache() == ({"tt2": (0.0, 0)}, date(2026, 11, 20))
+
+def test_read_ratings_worker_marks_the_films_without_a_rating(app, monkeypatch):
+    monkeypatch.setattr(boxdlist, "read_downloaded_ratings",
+                        lambda path, wanted: {"tt1": (8.3, 10)})
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append(args))
+    app._read_ratings_worker({"tt1", "tt2"}, Path("r.tsv.gz"))
+    assert scheduled == [({"tt1": (8.3, 10), "tt2": (0.0, 0)},)]
+
+def test_update_ratings_downloads_when_fresh_ratings_miss_a_new_film(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)          # one film, imdb id tt0000001
+    app.ratings_updated = date.today()      # fresh, but this id was never looked up
+    app.update_ratings()
+    assert len(started) == 1
+    assert started[0].target == app._download_ratings_worker
+    assert app.ratings_downloading is True
+
+def test_update_ratings_does_not_download_for_a_film_marked_as_unrated(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    ratings_ready_app(app, movies)
+    app.ratings_updated = date.today()
+    app.ratings = {"tt0000001": (0.0, 0)}   # looked up, IMDb has no rating
+    app.update_ratings()
+    assert started == []
+
+def test_start_ratings_download_can_be_forced(app, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.ratings_updated = date.today()
+    app.start_ratings_download(force=True)   # fresh ratings, but forced
+    assert len(started) == 1
+    assert started[0].target == app._download_ratings_worker
