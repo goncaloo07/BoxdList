@@ -50,7 +50,7 @@ DETAILS_WIDTH = 260
 DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
@@ -69,6 +69,7 @@ RATINGS_MAX_AGE_DAYS = 5
 NOT_FOUND_RETRY_DAYS = 5   # ask TMDB again about unknown films after this many days
 PULSE_MS = 40          # time between small color steps of the skeleton bars
 PULSE_CYCLE_MS = 1200  # time for one full pulse (dark, light, dark)
+DETAILS_REFRESH_MS = 500   # wait before redrawing the list when new data arrives
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -85,7 +86,7 @@ LOGO_GREEN = "#00E054"    # logo and import message
 LOGO_ORANGE = "#FF8000"   # logo only
 
 
-# ---------- Logic (pure functions, easy to test) ----------
+# ---------- Logic ----------
 def normalize(text: str) -> str:
     """Lowercase and accent-insensitive: 'Amélie' -> 'amelie'."""
     decomposed = unicodedata.normalize("NFD", text.lower())
@@ -172,6 +173,26 @@ def year_range_error(year_min: str, year_max: str) -> str | None:
         return "'From' is after 'to'"
     return None
 
+def parse_number(text: str) -> float | None:
+    """'7.5' or '7,5' -> 7.5. Empty, invalid or negative -> None."""
+    try:
+        value = float(text.strip().replace(",", "."))   # accepts a comma too
+    except ValueError:
+        return None
+    # float() also accepts "nan" and "inf", which make no sense here
+    return value if math.isfinite(value) and value >= 0 else None
+
+def number_range_error(low: str, high: str, label: str) -> str | None:
+    """Short message if the two fields are invalid, else None."""
+    values = []
+    for text in (low.strip(), high.strip()):
+        # empty is fine (no limit), but anything else must be a number
+        if text and parse_number(text) is None:
+            return f"{label} must be a number"
+        values.append(parse_number(text) if text else None)
+    if values[0] is not None and values[1] is not None and values[0] > values[1]:
+        return f"{label}: 'From' is after 'to'"
+    return None
 
 def filter_movies(movies: list[dict], term: str,
                   year_min: int | None, year_max: int | None) -> list[dict]:
@@ -628,6 +649,88 @@ def build_summary(movies, shown, with_details, width, cache, loading,
         lines.append((f"+ {len(movies) - shown} more", "meta"))
     return lines
 
+def movie_genres(details: dict | None) -> list[str]:
+    """Genres of a movie, or an empty list if unknown."""
+    genres = []
+    if details is None:
+        return genres
+    raw = details.get("genres")
+    if not isinstance(raw,list):
+        return genres
+    for g in raw:
+        if isinstance(g, str):
+            genres.append(g)
+    return genres
+
+def available_genres(movies: list[dict], cache: dict) -> list[str]:
+    """Sorted genres found in the movies of the list, without repeats."""
+    found = set()
+    for m in movies:
+        found.update(movie_genres(cache.get(movie_key(m))))
+    return sorted(found)
+
+def movie_runtime(details: dict | None) -> int | None:
+    """Runtime in minutes, or None if unknown."""
+    if details is None:
+        return None
+    runtime = details.get("runtime")
+    # accept only a whole number bigger than 0
+    if not (isinstance(runtime, int) and not isinstance(runtime, bool)) or runtime <= 0:
+        return None
+    return runtime
+
+def movie_rating(details: dict | None, ratings: dict) -> float | None:
+    """IMDb rating, or None if unknown."""
+    if details is None:
+        return None
+    imdb_id = details.get("imdb_id")
+    if not isinstance(imdb_id, str):
+        return None
+    entry = ratings.get(imdb_id)
+    if entry is None:
+        return None
+    rating, votes = entry
+    if rating <= 0 or votes <= 0:
+        return None
+    return rating
+
+def filter_by_details(movies: list[dict], cache: dict,
+                      genres: list[str],
+                      runtime_min: int | None = None,
+                      runtime_max: int | None = None,
+                      ratings: dict | None = None,
+                      rating_min: float | None = None,
+                      rating_max: float | None = None) -> list[dict]:
+    """Keeps only the movies that match the chosen genres, runtime and rating limits."""
+    # no genres chosen: the filter is off, so everything passes
+    if not genres and runtime_min is None and runtime_max is None and rating_max is None and rating_min is None:
+        return list(movies)
+    wanted = set(genres)
+    ratings = ratings or {}
+    result = []
+    for m in movies:
+        details = cache.get(movie_key(m))
+        # a movie without details has no genres, so it is hidden
+        if wanted <= set(movie_genres(details)):  
+            if runtime_min is not None or runtime_max is not None:
+                runtime = movie_runtime(details)
+                if runtime is None: 
+                   continue
+                if runtime_min is not None and runtime < runtime_min:
+                    continue
+                if runtime_max is not None and runtime > runtime_max:
+                    continue
+            if rating_min is not None or rating_max is not None:
+                rating = movie_rating(details, ratings)
+                if rating is None: 
+                    continue
+                if rating_min is not None and rating < rating_min:
+                    continue
+                if rating_max is not None and rating > rating_max:
+                    continue
+            result.append(m) 
+    return result
+    
 # ---------- Configuration (remember the last CSV) ----------
 def read_last_path() -> str | None:
     data = read_config()
@@ -783,6 +886,7 @@ class App(TkinterDnD.Tk):
         self.update_version: str | None = None
         self.update_url: str | None = None
         self._search_job = None          # pending after() ID (debounce)
+        self._refresh_job = None   # pending after() ID of the details refresh
         self.downloading = False   # True while the installer is being downloaded
         self.last_deleted: list[tuple[dict, int]] | None = None
         self.details_cache: dict[tuple[str, str], dict] = drop_expired_not_found(read_details_cache(), date.today())   # movie_key -> details that worked
@@ -882,6 +986,42 @@ class App(TkinterDnD.Tk):
         # Green note about new movies after an import (under the counter)
         self.new_label = ttk.Label(filters, text="", foreground=GREEN)
         self.new_label.pack(side="right")
+        
+        # ---------- Row 3: runtime and rating (genre comes next) ----------
+        more_filters = ttk.Frame(self, padding=(self.px(12), 0, self.px(12), self.px(8)))
+        more_filters.pack(fill="x")
+
+        self.runtime_min, self.runtime_max = tk.StringVar(), tk.StringVar()
+        self.rating_min, self.rating_max = tk.StringVar(), tk.StringVar()
+        ranges = (("Runtime (min)", self.runtime_min, self.runtime_max),
+                ("IMDb rating", self.rating_min, self.rating_max))
+        for i, (label, low_var, high_var) in enumerate(ranges):
+            # extra space before the second group
+            ttk.Label(more_filters, text=label, foreground=MUTED).pack(
+                side="left", padx=(0 if i == 0 else self.px(16), self.px(6)))
+            for var, hint in ((low_var, "From"), (high_var, "To")):
+                entry = ttk.Entry(more_filters, textvariable=var, width=7)
+                entry.pack(side="left", padx=(0, self.px(6)))
+                self.add_placeholder(entry, var, hint)
+                var.trace_add("write", lambda *_: self.schedule_update())
+                
+        # Genre: a button that opens a menu with one checkbox per genre
+        self.genre_vars: dict[str, tk.BooleanVar] = {}   # genre -> checked or not
+        ttk.Label(more_filters, text="Genre", foreground=MUTED).pack(
+            side="left", padx=(self.px(16), self.px(6)))
+        self.genre_button = ttk.Menubutton(more_filters, text="Choose...", width=10)
+        self.genre_menu = tk.Menu(self.genre_button, tearoff=0, bg=SURFACE, fg=TEXT,
+                                activebackground=GREEN, activeforeground=TEXT,
+                                selectcolor=TEXT, borderwidth=0, relief="flat",
+                                postcommand=self.update_genre_menu)   # runs before it opens
+        self.genre_button["menu"] = self.genre_menu
+        self.genre_button.pack(side="left")
+        # Chips: one small label per chosen genre, click one to remove it
+        self.genre_chips = ttk.Frame(more_filters)
+        self.genre_chips.pack(side="left", padx=(self.px(6), 0))
+        # Red message for invalid runtime or rating fields
+        self.details_error = ttk.Label(more_filters, text="", foreground="red")
+        self.details_error.pack(side="left", padx=(self.px(10), 0))
 
         # ---------- Table ----------
         middle = ttk.Frame(self, padding=(self.px(12), 0))
@@ -1147,6 +1287,12 @@ class App(TkinterDnD.Tk):
                         lightcolor=SURFACE, darkcolor=SURFACE,
                         padding=(self.px(6), self.px(4)))
         style.map("TCombobox", fieldbackground=[("readonly", SURFACE)])
+        # Genre button: same look as the other dark controls
+        style.configure("TMenubutton", background=SURFACE, foreground=TEXT,
+                        arrowcolor=TEXT, bordercolor=SURFACE, lightcolor=SURFACE,
+                        darkcolor=SURFACE, borderwidth=0,
+                        padding=(self.px(6), self.px(4)))
+        style.map("TMenubutton", background=[("active", ROW_ALT)])
         # The list that opens from the dropdown is not a ttk widget,
         # so it is styled with global options
         self.option_add("*TCombobox*Listbox.background", SURFACE)
@@ -1273,6 +1419,44 @@ class App(TkinterDnD.Tk):
             # that decade is gone: go back to "All" and clear the year fields
             self.decade.set(NO_FILTER)
             self.select_decade()
+            
+    def update_genre_menu(self) -> None:
+        """Rebuilds the genre menu. Runs every time the menu opens."""
+        self.genre_menu.delete(0, "end")
+        genres = available_genres(self.movies, self.details_cache)
+        if not genres:
+            self.genre_menu.add_command(label="No genres yet", state="disabled")
+            return
+        for genre in genres:
+            # setdefault keeps the checkbox of a genre chosen before
+            var = self.genre_vars.setdefault(genre, tk.BooleanVar())
+            self.genre_menu.add_checkbutton(label=genre, variable=var,
+                                            command=self.on_genre_change)
+
+    def selected_genres(self) -> list[str]:
+        """The genres that are checked right now."""
+        return [g for g, var in self.genre_vars.items() if var.get()]
+
+    def on_genre_change(self) -> None:
+        """Redraws the chips and updates the list after a genre changed."""
+        self.draw_genre_chips()
+        self.update_list()
+
+    def draw_genre_chips(self) -> None:
+        """One small green label for each chosen genre."""
+        for chip in self.genre_chips.winfo_children():
+            chip.destroy()   # start from zero, there are only a few
+        for genre in self.selected_genres():
+            chip = tk.Label(self.genre_chips, text=f"{genre}  ✕", bg=GREEN, fg=TEXT,
+                            padx=self.px(6), pady=self.px(2), cursor="hand2")
+            chip.pack(side="left", padx=(0, self.px(4)))
+            # g=genre fixes the value of genre in each loop iteration
+            chip.bind("<Button-1>", lambda _, g=genre: self.remove_genre(g))
+
+    def remove_genre(self, genre: str) -> None:
+        """Unchecks a genre. The menu checkbox follows, because it shares the variable."""
+        self.genre_vars[genre].set(False)
+        self.on_genre_change()
 
     def set_movies(self, movies: list[dict]) -> None:
         """Replaces the current watchlist and refreshes everything."""
@@ -1309,6 +1493,7 @@ class App(TkinterDnD.Tk):
             self.details_cache[key] = details   # only successes are saved
         else:
             self.details_failed.add(key)   # so the list does not ask again and again
+        self.schedule_details_refresh()
         if self.summary_movies:
             self.render_summary()   # several movies selected: refresh the list
             return
@@ -1396,6 +1581,13 @@ class App(TkinterDnD.Tk):
         self.decade.set(NO_FILTER)
         self.recent.set(NO_FILTER)
         self.complete_only.set(False)
+        self.runtime_min.set("")
+        self.runtime_max.set("")
+        self.rating_min.set("")
+        self.rating_max.set("")
+        for var in self.genre_vars.values():
+            var.set(False)
+        self.draw_genre_chips()
         self.update_list()
 
     # ----- Table Updates -----
@@ -1422,6 +1614,17 @@ class App(TkinterDnD.Tk):
         filtered = filter_recent(filtered, days, date.today())
         if self.complete_only.get():
             filtered = filter_complete(filtered)
+        # Invalid fields show a message and are ignored, like the year fields
+        runtime_error = number_range_error(self.runtime_min.get(), self.runtime_max.get(), "Runtime")
+        rating_error = number_range_error(self.rating_min.get(), self.rating_max.get(), "Rating")
+        self.details_error.config(text=runtime_error or rating_error or "")
+        runtime_low, runtime_high = (None, None) if runtime_error else (
+            parse_number(self.runtime_min.get()), parse_number(self.runtime_max.get()))
+        rating_low, rating_high = (None, None) if rating_error else (
+            parse_number(self.rating_min.get()), parse_number(self.rating_max.get()))
+        filtered = filter_by_details(filtered, self.details_cache, self.selected_genres(),
+                                    runtime_low, runtime_high,
+                                    self.ratings, rating_low, rating_high)
         self.visible = sort_movies(
             filtered, self.sort_column, self.reverse_order)
         if not any(m is self.last_randomized for m in self.visible):
@@ -1440,6 +1643,29 @@ class App(TkinterDnD.Tk):
         self.update_warning()
         self.update_buttons()
         self.on_select()
+    
+    def filters_use_details(self) -> bool:
+        """True if a genre, runtime or rating filter is on."""
+        fields = (self.runtime_min, self.runtime_max, self.rating_min, self.rating_max)
+        return bool(self.selected_genres()) or any(v.get().strip() for v in fields)
+
+    def schedule_details_refresh(self) -> None:
+        """Redraws the list soon, if a filter depends on data that just arrived."""
+        # a job already waiting will pick up this change too
+        if self._refresh_job is not None or not self.filters_use_details():
+            return
+        self._refresh_job = self.after(DETAILS_REFRESH_MS, self.refresh_filtered_list)
+
+    def refresh_filtered_list(self) -> None:
+        """Rebuilds the list and keeps the selected movies selected."""
+        self._refresh_job = None
+        selected = [self.visible[int(i)] for i in self.table.selection()]
+        self.update_list()   # this clears the selection
+        # the row ids changed, so find the same movies again (by identity)
+        ids = {id(m) for m in selected}
+        rows = [str(i) for i, m in enumerate(self.visible) if id(m) in ids]
+        if rows:
+            self.table.selection_set(*rows)
     
     def update_counter(self) -> None:
         """Shows 'visible / total' and, if any rows are selected, how many."""
@@ -1869,6 +2095,7 @@ class App(TkinterDnD.Tk):
             
     def refresh_after_ratings(self) -> None:
         """Redraws the panel or the list, so the rating bars match the new state."""
+        self.schedule_details_refresh()
         if self.summary_movies:
             self.render_summary()   # several movies selected: refresh the list
             return
@@ -2011,6 +2238,8 @@ class App(TkinterDnD.Tk):
             self.discard_ratings_file()
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.stop_pulse()
+            if self._refresh_job is not None:
+                self.after_cancel(self._refresh_job)
             self.destroy()
 
 if __name__ == "__main__":

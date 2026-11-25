@@ -406,6 +406,7 @@ def app(_window, monkeypatch):
     monkeypatch.setattr(boxdlist, "read_downloaded_ratings", lambda path, wanted: None)
     monkeypatch.setattr(boxdlist, "write_ratings_cache", lambda ratings, today: None)
     monkeypatch.setattr(_window, "executor", FakeExecutor())
+    fake_threads(monkeypatch)
     _window.prefetch_total = 0
     _window.prefetch_done = 0
     # Back to a clean state before each test
@@ -3860,3 +3861,429 @@ def test_start_ratings_download_can_be_forced(app, monkeypatch):
     app.start_ratings_download(force=True)   # fresh ratings, but forced
     assert len(started) == 1
     assert started[0].target == app._download_ratings_worker
+
+# ---------- movie_genres ----------
+@pytest.mark.parametrize("details, expected", [
+    ({"genres": ["Comedy", "Romance"]}, ["Comedy", "Romance"]),
+    ({"genres": ["Drama", 3]}, ["Drama"]),      # only text is kept
+    ({"genres": "Drama"}, []),                  # should be a list
+    ({"genres": None}, []),
+    ({}, []),                                   # key missing
+    (None, []),                                 # no details yet
+    (dict(boxdlist.NOT_FOUND), []),             # TMDB does not know the movie
+])
+def test_movie_genres(details, expected):
+    assert boxdlist.movie_genres(details) == expected
+
+# ---------- movie_runtime ----------
+@pytest.mark.parametrize("details, expected", [
+    ({"runtime": 122}, 122),
+    ({"runtime": 1}, 1),
+    ({"runtime": 0}, None),         # TMDB sends 0 when it does not know
+    ({"runtime": -5}, None),
+    ({"runtime": None}, None),      # series have no runtime
+    ({"runtime": "122"}, None),     # text is not trusted
+    ({"runtime": 122.0}, None),     # not a whole number
+    ({"runtime": True}, None),      # True counts as 1 in Python
+    ({}, None),
+    (None, None),
+])
+def test_movie_runtime(details, expected):
+    assert boxdlist.movie_runtime(details) == expected
+
+# ---------- movie_rating ----------
+RATINGS = {"tt1": (8.2, 850628), "tt2": (0.0, 0)}
+
+@pytest.mark.parametrize("details, expected", [
+    ({"imdb_id": "tt1"}, 8.2),
+    ({"imdb_id": "tt2"}, None),     # looked up, but IMDb has no rating
+    ({"imdb_id": "tt9"}, None),     # id that was never looked up
+    ({"imdb_id": None}, None),      # TMDB has no id
+    ({"imdb_id": ["tt1"]}, None),   # strange value must not crash
+    ({}, None),
+    (None, None),
+])
+def test_movie_rating(details, expected):
+    assert boxdlist.movie_rating(details, RATINGS) == expected
+
+# ---------- filter_by_details ----------
+def genre_cache(movies):
+    # Amélie: Comedy + Romance, Blade Runner: Sci-Fi, Cidade de Deus: Crime + Drama
+    # "No Year" has no details at all
+    return {
+        boxdlist.movie_key(movies[0]): {"genres": ["Comedy", "Romance"]},
+        boxdlist.movie_key(movies[1]): {"genres": ["Science Fiction"]},
+        boxdlist.movie_key(movies[2]): {"genres": ["Crime", "Drama"]},
+    }
+
+def test_filter_by_details_without_genres_keeps_everything(movies):
+    # the filter is off, so even movies without details stay
+    result = boxdlist.filter_by_details(movies, genre_cache(movies), [])
+    assert result == movies
+
+def test_filter_by_details_without_genres_returns_a_copy(movies):
+    result = boxdlist.filter_by_details(movies, {}, [])
+    assert result is not movies
+
+def test_filter_by_details_one_genre(movies):
+    result = boxdlist.filter_by_details(movies, genre_cache(movies), ["Drama"])
+    assert names(result) == ["Cidade de Deus"]
+
+def test_filter_by_details_needs_all_the_chosen_genres(movies):
+    cache = genre_cache(movies)
+    assert names(boxdlist.filter_by_details(movies, cache, ["Comedy", "Romance"])) == ["Amélie"]
+    # Amélie has Comedy but not Drama, so nobody has both
+    assert boxdlist.filter_by_details(movies, cache, ["Comedy", "Drama"]) == []
+
+def test_filter_by_details_hides_movies_without_details(movies):
+    result = boxdlist.filter_by_details(movies, genre_cache(movies), ["Comedy"])
+    assert "No Year" not in names(result)
+
+def test_filter_by_details_hides_the_not_found_marker(movies):
+    cache = {boxdlist.movie_key(movies[0]): dict(boxdlist.NOT_FOUND)}
+    assert boxdlist.filter_by_details(movies, cache, ["Comedy"]) == []
+
+def test_filter_by_details_does_not_change_original_list(movies):
+    original = list(movies)
+    boxdlist.filter_by_details(movies, genre_cache(movies), ["Drama"])
+    assert movies == original
+    
+# ---------- filter_by_details: runtime ----------
+def runtime_cache(movies):
+    # Amélie 90 min, Blade Runner 100 min, Cidade de Deus 120 min
+    # "No Year" is like a series: details exist, but no runtime
+    return {
+        boxdlist.movie_key(movies[0]): {"genres": ["Comedy"], "runtime": 90},
+        boxdlist.movie_key(movies[1]): {"genres": ["Science Fiction"], "runtime": 100},
+        boxdlist.movie_key(movies[2]): {"genres": ["Drama"], "runtime": 120},
+        boxdlist.movie_key(movies[3]): {"genres": ["Drama"], "runtime": None},
+    }
+
+def test_filter_by_details_runtime_min_only(movies):
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies), [], runtime_min=100)
+    assert names(result) == ["Blade Runner", "Cidade de Deus"]
+
+def test_filter_by_details_runtime_max_only(movies):
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies), [], runtime_max=100)
+    assert names(result) == ["Amélie", "Blade Runner"]
+
+def test_filter_by_details_runtime_range(movies):
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies), [],
+                                        runtime_min=95, runtime_max=110)
+    assert names(result) == ["Blade Runner"]
+
+def test_filter_by_details_runtime_limits_are_included(movies):
+    # exactly 100 minutes passes both as minimum and as maximum
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies), [],
+                                        runtime_min=100, runtime_max=100)
+    assert names(result) == ["Blade Runner"]
+
+def test_filter_by_details_runtime_hides_movies_without_runtime(movies):
+    # "No Year" has details but no runtime, like a series
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies), [], runtime_max=500)
+    assert "No Year" not in names(result)
+
+def test_filter_by_details_runtime_hides_movies_without_details(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"runtime": 90}}
+    result = boxdlist.filter_by_details(movies, cache, [], runtime_max=500)
+    assert names(result) == ["Amélie"]
+
+def test_filter_by_details_runtime_min_zero_still_filters(movies):
+    # 0 is a real limit, not "no limit": movies without runtime are hidden
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies), [], runtime_min=0)
+    assert "No Year" not in names(result)
+    assert len(result) == 3
+
+def test_filter_by_details_without_runtime_limits_keeps_movies_without_runtime(movies):
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies), [])
+    assert "No Year" in names(result)
+
+def test_filter_by_details_combines_genre_and_runtime(movies):
+    # Drama has Cidade de Deus (120) and No Year (no runtime)
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies), ["Drama"],
+                                        runtime_max=130)
+    assert names(result) == ["Cidade de Deus"]
+
+def test_filter_by_details_runtime_does_not_change_original_list(movies):
+    original = list(movies)
+    boxdlist.filter_by_details(movies, runtime_cache(movies), [], runtime_max=100)
+    assert movies == original
+    
+# ---------- filter_by_details: rating ----------
+def rating_data(movies):
+    # Amélie 8.0, Blade Runner 7.0, Cidade de Deus 6.0
+    # "No Year" has an id, but IMDb has no rating for it: (0.0, 0)
+    cache = {
+        boxdlist.movie_key(movies[0]): {"genres": ["Comedy"], "runtime": 90, "imdb_id": "tt1"},
+        boxdlist.movie_key(movies[1]): {"genres": ["Science Fiction"], "runtime": 100, "imdb_id": "tt2"},
+        boxdlist.movie_key(movies[2]): {"genres": ["Drama"], "runtime": 120, "imdb_id": "tt3"},
+        boxdlist.movie_key(movies[3]): {"genres": ["Drama"], "runtime": None, "imdb_id": "tt4"},
+    }
+    ratings = {"tt1": (8.0, 1000), "tt2": (7.0, 1000),
+               "tt3": (6.0, 1000), "tt4": (0.0, 0)}
+    return cache, ratings
+
+def test_filter_by_details_rating_min_only(movies):
+    cache, ratings = rating_data(movies)
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings, rating_min=7.0)
+    assert names(result) == ["Amélie", "Blade Runner"]
+
+def test_filter_by_details_rating_max_only(movies):
+    cache, ratings = rating_data(movies)
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings, rating_max=7.0)
+    assert names(result) == ["Blade Runner", "Cidade de Deus"]
+
+def test_filter_by_details_rating_range(movies):
+    cache, ratings = rating_data(movies)
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings,
+                                        rating_min=6.5, rating_max=7.5)
+    assert names(result) == ["Blade Runner"]
+
+def test_filter_by_details_rating_limits_are_included(movies):
+    # exactly 7.0 passes both as minimum and as maximum
+    cache, ratings = rating_data(movies)
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings,
+                                        rating_min=7.0, rating_max=7.0)
+    assert names(result) == ["Blade Runner"]
+
+def test_filter_by_details_rating_hides_unrated_movies(movies):
+    # "No Year" is marked (0.0, 0), so it has no rating
+    cache, ratings = rating_data(movies)
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings, rating_max=10)
+    assert "No Year" not in names(result)
+    assert len(result) == 3
+
+def test_filter_by_details_rating_hides_ids_that_were_never_looked_up(movies):
+    cache, ratings = rating_data(movies)
+    del ratings["tt1"]   # Amélie has an id, but no entry in the ratings
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings, rating_max=10)
+    assert "Amélie" not in names(result)
+
+def test_filter_by_details_rating_hides_movies_without_details(movies):
+    cache, ratings = rating_data(movies)
+    del cache[boxdlist.movie_key(movies[0])]
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings, rating_max=10)
+    assert "Amélie" not in names(result)
+
+def test_filter_by_details_rating_without_ratings_hides_everything(movies):
+    # ratings=None must not crash: no ratings loaded yet means no rating known
+    cache, _ = rating_data(movies)
+    assert boxdlist.filter_by_details(movies, cache, [], rating_min=1.0) == []
+
+def test_filter_by_details_rating_min_zero_still_filters(movies):
+    # 0 is a real limit, not "no limit": unrated movies are hidden
+    cache, ratings = rating_data(movies)
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings, rating_min=0)
+    assert "No Year" not in names(result)
+    assert len(result) == 3
+
+def test_filter_by_details_without_rating_limits_keeps_unrated_movies(movies):
+    cache, ratings = rating_data(movies)
+    result = boxdlist.filter_by_details(movies, cache, [], ratings=ratings)
+    assert "No Year" in names(result)
+
+def test_filter_by_details_combines_genre_runtime_and_rating(movies):
+    # runtime_max=110 removes Cidade de Deus, rating_min=7.5 removes Blade Runner
+    cache, ratings = rating_data(movies)
+    result = boxdlist.filter_by_details(movies, cache, [], runtime_max=110,
+                                        ratings=ratings, rating_min=7.5)
+    assert names(result) == ["Amélie"]
+    # adding a genre that Amélie does not have leaves nothing
+    assert boxdlist.filter_by_details(movies, cache, ["Drama"], runtime_max=110,
+                                      ratings=ratings, rating_min=7.5) == []
+
+def test_filter_by_details_rating_does_not_change_original_list(movies):
+    cache, ratings = rating_data(movies)
+    original = list(movies)
+    boxdlist.filter_by_details(movies, cache, [], ratings=ratings, rating_min=7.0)
+    assert movies == original
+    
+# ---------- available_genres ----------
+def test_available_genres_is_sorted_and_without_repeats(movies):
+    cache = {boxdlist.movie_key(movies[0]): {"genres": ["Comedy", "Romance"]},
+             boxdlist.movie_key(movies[2]): {"genres": ["Comedy", "Drama"]}}
+    assert boxdlist.available_genres(movies, cache) == ["Comedy", "Drama", "Romance"]
+
+def test_available_genres_ignores_movies_without_details(movies):
+    assert boxdlist.available_genres(movies, {}) == []
+
+def test_available_genres_ignores_movies_that_are_not_in_the_list(movies):
+    # a deleted movie can still be in the cache
+    cache = {("Deleted", "1999"): {"genres": ["Horror"]}}
+    assert boxdlist.available_genres(movies, cache) == []
+    
+# ---------- genre chips ----------
+def chip_texts(app):
+    return [c.cget("text") for c in app.genre_chips.winfo_children()]
+
+def test_genre_chips_show_the_chosen_genres(app):
+    app.genre_vars["Comedy"] = tk.BooleanVar(value=True)
+    app.genre_vars["Drama"] = tk.BooleanVar(value=False)
+    app.on_genre_change()
+    assert chip_texts(app) == ["Comedy  ✕"]
+    app.genre_vars.clear()   # the window is shared, so leave it clean
+    app.on_genre_change()
+
+def test_remove_genre_unchecks_it_and_removes_the_chip(app):
+    app.genre_vars["Comedy"] = tk.BooleanVar(value=True)
+    app.on_genre_change()
+    app.remove_genre("Comedy")
+    assert app.genre_vars["Comedy"].get() is False
+    assert chip_texts(app) == []
+    app.genre_vars.clear()
+    
+# ---------- parse_number and number_range_error ----------
+@pytest.mark.parametrize("text, expected", [
+    ("90", 90.0), (" 7.5 ", 7.5), ("7,5", 7.5), ("0", 0.0),
+    ("", None), ("abc", None), ("-1", None), ("nan", None), ("inf", None),
+])
+def test_parse_number(text, expected):
+    assert boxdlist.parse_number(text) == expected
+
+@pytest.mark.parametrize("low, high", [("", ""), ("90", ""), ("", "120"), ("90", "120"), ("90", "90")])
+def test_number_range_error_valid(low, high):
+    assert boxdlist.number_range_error(low, high, "Runtime") is None
+
+def test_number_range_error_not_a_number():
+    assert boxdlist.number_range_error("abc", "", "Runtime") == "Runtime must be a number"
+    assert boxdlist.number_range_error("", "x", "Rating") == "Rating must be a number"
+
+def test_number_range_error_inverted_range():
+    assert boxdlist.number_range_error("120", "90", "Runtime") == "Runtime: 'From' is after 'to'"
+
+# ---------- new filters in the interface ----------
+def details_for_ui(app, movies):
+    # Amélie: Comedy, 90 min, 8.0 | Blade Runner: Sci-Fi, 120 min, 6.0
+    app.details_cache[boxdlist.movie_key(movies[0])] = {
+        "genres": ["Comedy"], "runtime": 90, "imdb_id": "tt1"}
+    app.details_cache[boxdlist.movie_key(movies[1])] = {
+        "genres": ["Science Fiction"], "runtime": 120, "imdb_id": "tt2"}
+    app.ratings = {"tt1": (8.0, 1000), "tt2": (6.0, 1000)}
+
+def test_runtime_filter_changes_the_table(app, movies):
+    app.set_movies(movies)
+    details_for_ui(app, movies)
+    app.runtime_max.set("100")
+    app.update_list()
+    assert table_names(app) == ["Amélie"]
+
+def test_rating_filter_changes_the_table(app, movies):
+    app.set_movies(movies)
+    details_for_ui(app, movies)
+    app.rating_min.set("7")
+    app.update_list()
+    assert table_names(app) == ["Amélie"]
+
+def test_genre_filter_changes_the_table(app, movies):
+    app.set_movies(movies)
+    details_for_ui(app, movies)
+    app.genre_vars["Science Fiction"] = tk.BooleanVar(value=True)
+    app.update_list()
+    assert table_names(app) == ["Blade Runner"]
+    app.genre_vars.clear()   # the window is shared, so leave it clean
+
+def test_invalid_runtime_shows_a_message_and_is_ignored(app, movies):
+    app.set_movies(movies)
+    app.runtime_min.set("abc")
+    app.update_list()
+    assert app.details_error.cget("text") == "Runtime must be a number"
+    assert len(table_names(app)) == 4   # the filter was ignored
+
+def test_valid_fields_clear_the_error_message(app, movies):
+    app.set_movies(movies)
+    app.runtime_min.set("abc")
+    app.update_list()
+    app.runtime_min.set("90")
+    app.update_list()
+    assert app.details_error.cget("text") == ""
+
+def test_clear_filters_resets_the_new_filters(app, movies):
+    app.set_movies(movies)
+    details_for_ui(app, movies)
+    app.genre_vars["Comedy"] = tk.BooleanVar(value=True)
+    app.runtime_max.set("100")
+    app.rating_min.set("7")
+    app.clear_filters()
+    assert app.runtime_min.get() == app.runtime_max.get() == ""
+    assert app.rating_min.get() == app.rating_max.get() == ""
+    assert app.selected_genres() == []
+    assert chip_texts(app) == []
+    assert len(table_names(app)) == 4
+    app.genre_vars.clear()
+
+def test_set_movies_resets_the_new_filters(app, movies):
+    app.set_movies(movies)
+    app.runtime_max.set("100")
+    app.set_movies(movies)   # like importing a new CSV
+    assert app.runtime_max.get() == ""
+    
+# ---------- the list refreshes when details and ratings arrive ----------
+def refreshes(scheduled, app):
+    # the scheduled calls that are the details refresh (show_status also uses after)
+    return [ms for ms, func in scheduled if func == app.refresh_filtered_list]
+
+def capture_after(app, monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append((ms, func)) or "job")
+    app._refresh_job = None
+    return scheduled
+
+def test_filters_use_details(app):
+    assert app.filters_use_details() is False
+    app.runtime_max.set("100")
+    assert app.filters_use_details() is True
+    app.runtime_max.set("  ")   # only spaces is the same as empty
+    assert app.filters_use_details() is False
+
+def test_details_arriving_schedule_a_refresh_when_a_filter_is_on(app, movies, monkeypatch):
+    app.set_movies(movies)
+    app.runtime_max.set("100")
+    scheduled = capture_after(app, monkeypatch)
+    app._on_details_result(movies[0], DETAILS)
+    assert refreshes(scheduled, app) == [boxdlist.DETAILS_REFRESH_MS]
+    app._refresh_job = None   # the window is shared, so leave it clean
+
+def test_details_arriving_without_filters_schedule_nothing(app, movies, monkeypatch):
+    app.set_movies(movies)
+    scheduled = capture_after(app, monkeypatch)
+    app._on_details_result(movies[0], DETAILS)
+    assert refreshes(scheduled, app) == []
+
+def test_several_arrivals_schedule_only_one_refresh(app, movies, monkeypatch):
+    app.set_movies(movies)
+    app.runtime_max.set("100")
+    scheduled = capture_after(app, monkeypatch)
+    app._on_details_result(movies[0], DETAILS)
+    app._on_details_result(movies[1], DETAILS)
+    assert len(refreshes(scheduled, app)) == 1
+    app._refresh_job = None
+
+def test_ratings_arriving_schedule_a_refresh_when_a_filter_is_on(app, movies, monkeypatch):
+    app.set_movies(movies)
+    app.rating_min.set("7")
+    scheduled = capture_after(app, monkeypatch)
+    app._on_ratings_result({"tt1": (8.0, 10)})
+    assert len(refreshes(scheduled, app)) == 1
+    app._refresh_job = None
+
+def test_refresh_shows_the_movies_that_now_match(app, movies):
+    app.set_movies(movies)
+    app.runtime_max.set("100")
+    app.update_list()
+    assert table_names(app) == []   # no details yet, so everything is hidden
+    details_for_ui(app, movies)     # the details "arrive"
+    app.refresh_filtered_list()
+    assert table_names(app) == ["Amélie"]
+
+def test_refresh_keeps_the_selection(app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    details_for_ui(app, movies)
+    app.runtime_max.set("130")   # Amélie (90) and Blade Runner (120) both match
+    app.update_list()
+    app.table.selection_set("1")   # Blade Runner
+    app.refresh_filtered_list()
+    selected = [app.table.item(r, "values")[0] for r in app.table.selection()]
+    assert selected == ["Blade Runner"]
+    assert app._refresh_job is None
