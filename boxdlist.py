@@ -27,6 +27,8 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor
 import gzip
 import math
+import io
+from PIL import Image, ImageTk
   
 def app_folder() -> Path:
     """Folder of the .exe when frozen, or of this file when running the code."""
@@ -50,9 +52,11 @@ DETAILS_WIDTH = 260
 DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
+POSTER_URL = "https://image.tmdb.org/t/p/w185"
+POSTER_WORKERS = 4 
 RECENT_OPTIONS = {NO_FILTER: None, "Last 7 days": 7,
                   "Last 30 days": 30, "Last year": 365}
 MAX_OPEN_AT_ONCE = 5 # above this, ask before opening many pages
@@ -70,6 +74,10 @@ NOT_FOUND_RETRY_DAYS = 5   # ask TMDB again about unknown films after this many 
 PULSE_MS = 40          # time between small color steps of the skeleton bars
 PULSE_CYCLE_MS = 1200  # time for one full pulse (dark, light, dark)
 DETAILS_REFRESH_MS = 500   # wait before redrawing the list when new data arrives
+POSTER_WIDTH = 185    # same size as the "w185" images from TMDB
+POSTER_HEIGHT = 278   # posters are 2:3, so this is the grey block size
+POSTER_MIN_HEIGHT = 60   # below this the poster is hidden, the text matters more
+PANEL_MARGIN = 30        # space for the gaps between the labels of the panel
 
 # Letterboxd-inspired palette
 BG = "#14181C"            # window background
@@ -325,6 +333,18 @@ def fetch_movie_details(name: str, year: str) -> dict | None:
     except (OSError, ValueError):
         return None
     
+def fetch_poster(poster_path) -> bytes | None:
+    """Downloads a poster. Returns the image bytes, or None if anything fails."""
+    # only a text that starts with "/" makes a valid address
+    if not isinstance(poster_path, str) or not poster_path.startswith("/"):
+        return None
+    try:
+        with urllib.request.urlopen(f"{POSTER_URL}{poster_path}", timeout=5) as response:
+            bits = response.read()
+    except (OSError, ValueError):
+        return None
+    return bits or None
+    
 def find_installer_url(release: dict) -> str | None:
     """Returns the download link of BoxdListSetup.exe, or None if missing."""
     for release_asset in release.get("assets", []):
@@ -384,10 +404,10 @@ def count_duplicates(movies: list[dict]) -> int:
     return count
 
 def details_outdated(details: dict) -> bool:
-    """True if the details were saved before the proxy sent 'imdb_id'."""
+    """True if the details were saved before the proxy sent 'imdb_id' or 'poster_path'."""
     if is_not_found(details):
         return False
-    return "imdb_id" not in details    
+    return "imdb_id" not in details or "poster_path" not in details
 
 def not_found_expired(details: dict, today: date) -> bool:
     """True for an old 'not found' marker, or one saved without a date by an older version."""
@@ -443,6 +463,21 @@ def format_rating(rating, votes) -> str:
     else:
         shown = str(votes)
     return f"★ {rating:.1f}/10 ({shown} votes)"
+
+def load_poster_image(data: bytes, width: int, max_height: int | None = None):
+    """Opens image bytes and scales them to 'width'. Returns None if the image is broken.
+    If 'max_height' is given, the image is made smaller to fit it, keeping the ratio.
+    """
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()   # forces the decoding, so a broken file fails here
+    except (OSError, ValueError):
+        return None
+    height = round(image.height * width / image.width)
+    if max_height is not None and height > max_height:
+        height = max(1, max_height)
+        width = max(1, round(image.width * height / image.height))
+    return image.convert("RGB").resize((width, height), Image.LANCZOS)
 
 def rating_line(details: dict, ratings: dict) -> str:
     """'★ 8.2/10 (850k votes)'. Empty if there is no id or no rating yet."""
@@ -894,6 +929,9 @@ class App(TkinterDnD.Tk):
         self.summary_movies: list[dict] = []   # the selected movies, when there are several
         self.details_inflight: set[tuple[str, str]] = set()   # requests in progress
         self.details_failed: set[tuple[str, str]] = set()     # requests that failed
+        self.posters: dict[tuple[str, str], bytes] = {}   # movie_key -> image bytes
+        self.posters_inflight: set[tuple[str, str]] = set()   # requests in progress
+        self.posters_failed: set[tuple[str, str]] = set()     # requests that failed
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.executor = ThreadPoolExecutor(max_workers=DETAILS_WORKERS)
         self.prefetch_total = 0   # how many movies this round has to fetch
@@ -1051,19 +1089,28 @@ class App(TkinterDnD.Tk):
 
         # One movie selected: title, genres and synopsis
         self.single_view = ttk.Frame(self.details)
+        self.single_view.bind("<Configure>", lambda _: self.schedule_fit())
         self.details_title = ttk.Label(self.single_view, text="", wraplength=wrap,
-                                       justify="left",
-                                       font=("Segoe UI", 11, "bold"))
+                               justify="left",
+                               font=("Segoe UI", 12, "bold"))
         self.details_title.pack(anchor="w")
         self.details_meta = ttk.Label(self.single_view, text="", wraplength=wrap,
-                                      justify="left", foreground=MUTED)
-        self.details_meta.pack(anchor="w", pady=(self.px(2), 0))
+                                    justify="left", foreground=MUTED)
+        self.details_meta.pack(anchor="w", pady=(self.px(4), 0))
         self.details_rating = ttk.Label(self.single_view, text="", wraplength=wrap,
-                                        justify="left", foreground=MUTED)
-        self.details_rating.pack(anchor="w", pady=(self.px(2), 0))
+                                justify="left", foreground=ORANGE,
+                                font=("Segoe UI", 9, "bold"))
+        self.details_rating.pack(anchor="w", pady=(self.px(4), 0))
+        # Poster: the image, and a grey block that stands in for it while it loads
+        self.poster_label = tk.Label(self.single_view, bg=BG, bd=0,
+                             highlightthickness=1,   # thin frame around the image
+                             highlightbackground=SCROLL, highlightcolor=SCROLL)
+        self.poster_photo = None   # keep a reference or the image disappears
+        self.poster_bar = tk.Frame(self.single_view, width=self.px(POSTER_WIDTH),
+                                height=self.px(POSTER_HEIGHT), bg=ROW_ALT)
         self.details_overview = ttk.Label(self.single_view, text="", wraplength=wrap,
                                           justify="left")
-        self.details_overview.pack(anchor="w", pady=(self.px(10), 0))
+        self.details_overview.pack(anchor="w", pady=(self.px(12), 0))
         
         # Skeleton: grey bars that stand in for the text while it loads
         self.skeleton = ttk.Frame(self.single_view)
@@ -1081,6 +1128,9 @@ class App(TkinterDnD.Tk):
         
         self._pulse_job = None      # pending after() ID, None when not pulsing
         self._pulse_phase = 0.0   # position in the pulse cycle, from 0 to 1
+        
+        self.overview_full = ""   # the whole synopsis, before any cut to fit the panel
+        self._fit_job = None      # pending after() ID of the panel refit
 
         # Several movies selected: a list that adapts to the space it has.
         # Every line is cut by hand (wrap="none"), so we know how many lines it uses.
@@ -1107,7 +1157,7 @@ class App(TkinterDnD.Tk):
 
         # ---------- Bottom Section ----------
         bottom = ttk.Frame(self, padding=self.px(12))
-        bottom.pack(fill="x")
+        bottom.pack(side="bottom", fill="x", before=middle)
 
         # Created now, but placed on screen later by update_buttons
         self.random_button = ttk.Button(bottom, text="Random Movie (Ctrl+R)",
@@ -1501,6 +1551,7 @@ class App(TkinterDnD.Tk):
             return   # the user already picked something else
         if details:
             self.show_details(movie, details)
+            self.request_poster(movie, details)   # now we know the poster path
         else:
             self.show_message(movie, "Could not load details.")
     
@@ -1830,6 +1881,7 @@ class App(TkinterDnD.Tk):
         elif not isinstance(overview, str) or not overview.strip():
             overview = "No synopsis available."
         self.details_overview.config(text=overview.strip())
+        self.overview_full = overview.strip()
         # only when the film has an id, no rating yet, and ratings are on their way
         has_id = bool(details) and isinstance(details.get("imdb_id"), str)
         if has_id and not rating and self.ratings_pending():
@@ -1838,6 +1890,7 @@ class App(TkinterDnD.Tk):
             self.rating_bar.pack(anchor="w", pady=(self.px(6), self.px(2)),
                                 before=self.details_overview)
             self.start_pulse()
+        self.update_poster(movie)
         
     def show_message(self, movie: dict, text: str) -> None:
         """Shows the title and one line of text, like 'Loading...'."""
@@ -1847,6 +1900,7 @@ class App(TkinterDnD.Tk):
         self.details_meta.config(text="")   # clear the old genres and runtime
         self.details_rating.config(text="")   # and the old rating
         self.details_overview.config(text=text)
+        self.overview_full = text
         
     def show_skeleton(self, movie: dict) -> None:
         """Shows the title and grey bars while the details load."""
@@ -1860,11 +1914,108 @@ class App(TkinterDnD.Tk):
         """Hides the skeleton loading"""
         self.skeleton.pack_forget()
         self.rating_bar.pack_forget()
+        self.poster_label.pack_forget()
+        self.poster_bar.pack_forget()
         self.stop_pulse()
         # the rating label may have been taken off the screen by the bar
         if self.details_rating.winfo_manager() != "pack":
-            self.details_rating.pack(anchor="w", pady=(self.px(2), 0),
+            self.details_rating.pack(anchor="w", pady=(self.px(4), 0),
                                     before=self.details_overview)
+    
+    def update_poster(self, movie: dict) -> None:
+        """Shows the poster, a grey block while it loads, or nothing."""
+        if movie is not self.details_target:
+            return   # the user already picked something else
+        key = movie_key(movie)
+        self.poster_label.pack_forget()
+        self.poster_bar.pack_forget()
+        free = self.panel_free_height()
+        poster_room = None   # None means the panel has no size yet, so no limit
+        if free is None:
+            self.fit_overview(None)
+        else:
+            self.details_overview.config(text=self.overview_full)
+            self.update_idletasks()
+            full = self.details_overview.winfo_reqheight()   # height of the whole synopsis
+            poster_min = self.px(POSTER_MIN_HEIGHT)
+            line = self.summary_font.metrics("linespace")
+            if free - full >= poster_min:
+                # everything fits: whole synopsis, and the poster takes what is left
+                poster_room = min(free - full, self.px(POSTER_HEIGHT))
+                text_room = full
+            else:
+                # tight: the text keeps about 3 lines, the poster gets the rest (but never less than the minimum)
+                text_min = min(full, 3 * line)
+                poster_room = max(poster_min, min(free - text_min, self.px(POSTER_HEIGHT)))
+                text_room = free - poster_room
+                if text_room < line:
+                    # not even one line of text would be left: only text
+                    poster_room, text_room = 0, free
+            self.fit_overview(text_room)
+        if poster_room == 0:
+            self.stop_pulse_if_idle()
+            return
+        data = self.posters.get(key)
+        if data:
+            image = load_poster_image(data, self.px(POSTER_WIDTH), poster_room)
+            if image is not None:
+                self.poster_photo = ImageTk.PhotoImage(image)
+                self.poster_label.config(image=self.poster_photo)
+                self.poster_label.pack(anchor="w", pady=(self.px(10), 0),
+                                    before=self.details_overview)
+        elif key in self.posters_inflight:
+            # same shape as a real poster (2:3), never taller than the room
+            height = self.px(POSTER_HEIGHT)
+            if poster_room is not None:
+                height = min(height, poster_room)
+            self.poster_bar.config(width=round(height / 1.5), height=height)
+            self.poster_bar.pack(anchor="w", pady=(self.px(10), 0),
+                                before=self.details_overview)
+            self.start_pulse()
+            return
+        self.stop_pulse_if_idle()
+
+    def stop_pulse_if_idle(self) -> None:
+        """Stops the pulse, unless a skeleton is still on the screen."""
+        shown = (self.skeleton, self.rating_bar, self.poster_bar)
+        if not any(w.winfo_manager() == "pack" for w in shown):
+            self.stop_pulse()
+            
+    def schedule_fit(self) -> None:
+        """Waits a moment after the last resize, so dragging the window stays smooth."""
+        if self._fit_job is not None:
+            self.after_cancel(self._fit_job)
+        self._fit_job = self.after(100, self.refit_panel)
+
+    def refit_panel(self) -> None:
+        """Redraws the synopsis and the poster for the new panel size."""
+        self._fit_job = None
+        if self.details_target is not None:
+            self.update_poster(self.details_target)
+
+    def panel_free_height(self) -> int | None:
+        """Height left after the title, genres and rating. None if the panel has no size yet."""
+        self.update_idletasks()
+        total = self.single_view.winfo_height()
+        if total <= 1:
+            return None
+        used = sum(w.winfo_reqheight() for w in self.single_view.pack_slaves()
+                if w not in (self.details_overview, self.poster_label, self.poster_bar))
+        return total - used - self.px(PANEL_MARGIN)
+
+    def fit_overview(self, room: int | None) -> None:
+        """Cuts the synopsis with '...' until it fits in 'room' (None = no limit)."""
+        text = self.overview_full
+        self.details_overview.config(text=text)   # start from the whole text
+        if room is None or not text:
+            return
+        self.update_idletasks()
+        words = text.split()
+        while words and self.details_overview.winfo_reqheight() > room:
+            # drop about a tenth of the words each round
+            words = words[:len(words) - max(1, len(words) // 10)]
+            self.details_overview.config(text=" ".join(words).rstrip(",.;:") + "...")
+            self.update_idletasks()
     
     def start_pulse(self) -> None:
         """Starts the pulsing, unless it is already running."""
@@ -1889,7 +2040,7 @@ class App(TkinterDnD.Tk):
 
     def _paint_skeleton(self, color: str) -> None:
         """Colors the bars of the panel and the blocks of the list."""
-        for bar in (*self.skeleton_bars, self.rating_bar):
+        for bar in (*self.skeleton_bars, self.rating_bar, self.poster_bar):
             bar.config(bg=color)
         self.summary.tag_configure("skeleton", foreground=color)
 
@@ -1902,6 +2053,7 @@ class App(TkinterDnD.Tk):
         """Runs whenever the selection changes."""
         self.update_counter()
         self.details_failed.clear()   # a new selection may retry what failed
+        self.posters_failed.clear()
         sel = self.table.selection()
         if not sel:
             self.details_target = None   # a late answer must not refill the panel
@@ -1927,6 +2079,7 @@ class App(TkinterDnD.Tk):
         cached = self.details_cache.get(movie_key(movie))
         if cached:
             self.show_details(movie, cached)   # no network needed
+            self.request_poster(movie, cached)
             return
         self.show_skeleton(movie)
         threading.Thread(target=self._details_worker, args=(movie,),
@@ -1935,6 +2088,7 @@ class App(TkinterDnD.Tk):
     def clear_details(self) -> None:
         """Empties the panel (nothing selected)."""
         self.hide_skeleton()
+        self.overview_full = ""
         for label in (self.details_title, self.details_meta,
                       self.details_rating, self.details_overview):
             label.config(text="")
@@ -1978,6 +2132,38 @@ class App(TkinterDnD.Tk):
             threading.Thread(target=self._details_worker, args=(movie,),
                              daemon=True).start()
             
+    def request_poster(self, movie: dict, details: dict) -> None:
+        """Starts a background request for the poster, if it is needed."""
+        key = movie_key(movie)
+        # known, already on its way, or failed a moment ago
+        if key in self.posters or key in self.posters_inflight or key in self.posters_failed:
+            return
+        poster_path = details.get("poster_path")
+        if not isinstance(poster_path, str):
+            return   # the film has no poster
+        self.posters_inflight.add(key)
+        threading.Thread(target=self._poster_worker, args=(movie, poster_path),
+                        daemon=True).start()
+        self.update_poster(movie)   # shows the grey block right away
+            
+    def _poster_worker(self, movie: dict, poster_path: str) -> None:
+        """Downloads one poster. Runs in a background thread."""
+        data = fetch_poster(poster_path)   # slow part, runs in the background
+        try:
+            self.after(0, self._on_poster_result, movie, data)
+        except (RuntimeError, tk.TclError):
+            pass
+        
+    def _on_poster_result(self, movie: dict, data: bytes | None) -> None:
+        """Runs on the main thread when a poster arrived (or failed)."""
+        key = movie_key(movie)
+        self.posters_inflight.discard(key)
+        if data:
+            self.posters[key] = data
+        else:
+            self.posters_failed.add(key)
+        self.update_poster(movie)
+    
     def prefetch_details(self) -> None:
         """Fetches the details of every movie in the background."""
         todo = movies_to_fetch(self.movies, self.details_cache, self.details_inflight)
@@ -2240,6 +2426,8 @@ class App(TkinterDnD.Tk):
             self.stop_pulse()
             if self._refresh_job is not None:
                 self.after_cancel(self._refresh_job)
+            if self._fit_job is not None:
+                self.after_cancel(self._fit_job)
             self.destroy()
 
 if __name__ == "__main__":

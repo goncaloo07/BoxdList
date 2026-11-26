@@ -15,6 +15,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Remembers the window size, its position and the sort order
 - Random pick from the films currently shown, never repeating the previous one
 - Select a film to see its genres, runtime, synopsis and IMDb rating. After you import, the details are fetched in the background and saved on your computer, so they load instantly next time
+- The film poster shows above the synopsis. It grows or shrinks with the window, and it hides when there is no room left, so the text always fits
 - Select several films (drag, `Ctrl+click` or `Shift+click`) to see a list that fits the available space: as many films as possible with their details and IMDb rating, or just the names when there is little room
 - `Enter` and `Delete` work on all the selected films at once
 - Double-click a film (or press `Enter`) to open its Letterboxd page
@@ -43,13 +44,15 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 
 ## Movie details
 
-When you select a film, BoxdList shows its genres, runtime and synopsis. The data comes from [TMDB](https://www.themoviedb.org/).
+When you select a film, BoxdList shows its poster, genres, runtime and synopsis. The data comes from [TMDB](https://www.themoviedb.org/).
 
-After you import a CSV, the app fetches the details of every film in the background and shows the progress at the top right. The details are saved in `data/details_cache.json` next to the app, so the next time they load without internet and only new films are fetched. Films that TMDB does not know are saved too, and asked again after 5 days (and once when you update the app), in case TMDB adds them later. To start over, close the app and delete that file. Details saved by older versions are fetched again once, to get the IMDb id.
+After you import a CSV, the app fetches the details of every film in the background and shows the progress at the top right. The details are saved in `data/details_cache.json` next to the app, so the next time they load without internet and only new films are fetched. Films that TMDB does not know are saved too, and asked again after 5 days (and once when you update the app), in case TMDB adds them later. To start over, close the app and delete that file. Details saved by older versions are fetched again once, to get the IMDb id and the poster.
+
+Only the address of the poster is saved in that file. The image itself is downloaded when you select the film, and it is kept in memory until you close the app, so selecting the same film again is instant. Films that TMDB has no poster for show the details as usual, without an image.
 
 Letterboxd also lists TV series. For those, BoxdList shows the genres and the synopsis, but no runtime. Some entries may show "No details found", for example episodes or titles that TMDB lists with a different year.
 
-The app does not talk to TMDB directly. It asks a small proxy ([boxdlist-proxy](https://github.com/goncaloo07/boxdlist-proxy)), which keeps the TMDB API key private. Only the title and the year of the film are sent. Without an internet connection the app works as before: the details already saved are shown, and the panel says the others could not be loaded.
+The app does not talk to TMDB directly. It asks a small proxy ([boxdlist-proxy](https://github.com/goncaloo07/boxdlist-proxy)), which keeps the TMDB API key private. Only the title and the year of the film are sent. The poster is downloaded straight from TMDB's image server, without the proxy. Without an internet connection the app works as before: the details already saved are shown, and the panel says the others could not be loaded.
 
 ## IMDb ratings
 

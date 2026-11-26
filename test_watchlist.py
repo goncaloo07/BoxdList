@@ -418,6 +418,9 @@ def app(_window, monkeypatch):
     _window.details_target = None
     _window.details_inflight.clear()
     _window.details_failed.clear()
+    _window.posters.clear()
+    _window.posters_inflight.clear()
+    _window.posters_failed.clear()
     _window.summary_movies = []
     _window.ratings = {}
     _window.ratings_updated = None
@@ -1798,7 +1801,7 @@ def test_details_line(details, expected):
     
 # ---------- details panel ----------
 DETAILS = {"genres": ["Comedy"], "runtime": 122, "overview": "A story."}
-DETAILS_WITH_ID = {**DETAILS, "imdb_id": "tt0000001"}
+DETAILS_WITH_ID = {**DETAILS, "imdb_id": "tt0000001", "poster_path": None}
 
 def fake_threads(monkeypatch):
     # Replaces threading inside boxdlist, so on_select never starts a real
@@ -2187,7 +2190,7 @@ def test_deselecting_everything_hides_the_panel_and_the_list(app, movies, monkey
 
 # ---------- movies_to_fetch ----------
 def test_movies_to_fetch_skips_movies_in_the_cache(movies):
-    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": "tt0000001"}}
+    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": "tt0000001", "poster_path": None}}
     result = boxdlist.movies_to_fetch(movies, cache, set())
     assert names(result) == ["Blade Runner", "Cidade de Deus", "No Year"]
 
@@ -2845,7 +2848,8 @@ def test_ratings_result_empty_dict_counts_as_success(app, monkeypatch):
 def ratings_ready_app(app, movies):
     # a list with one movie whose imdb id is already in the details cache
     app.set_movies(movies)
-    app.details_cache[boxdlist.movie_key(movies[0])] = {"imdb_id": "tt0000001"}
+    app.details_cache[boxdlist.movie_key(movies[0])] = {
+    "imdb_id": "tt0000001", "poster_path": None}
 
 def test_update_ratings_starts_the_download_when_there_are_no_saved_ratings(
         app, movies, monkeypatch):
@@ -3102,11 +3106,12 @@ def test_on_close_deletes_a_downloaded_ratings_file(app, monkeypatch, tmp_path):
     
 # ---------- details_outdated ----------
 @pytest.mark.parametrize("details, expected", [
-    ({"genres": ["Comedy"]}, True),      # saved before imdb_id existed
+    ({"genres": ["Comedy"]}, True),                          # saved before imdb_id existed
     ({}, True),
-    ({"imdb_id": "tt0000001"}, False),   # up to date
-    ({"imdb_id": None}, False),          # TMDB has no id: the key exists, do not ask again
-    (dict(boxdlist.NOT_FOUND), False),   # never has an id, never asked again
+    ({"imdb_id": "tt0000001"}, True),                        # has the id, but no poster_path yet
+    ({"imdb_id": "tt0000001", "poster_path": "/a.jpg"}, False),   # up to date
+    ({"imdb_id": None, "poster_path": None}, False),         # TMDB has neither: do not ask again
+    (dict(boxdlist.NOT_FOUND), False),
 ])
 def test_details_outdated(details, expected):
     assert boxdlist.details_outdated(details) is expected
@@ -3117,7 +3122,7 @@ def test_movies_to_fetch_asks_again_for_outdated_details(movies):
     assert names(result) == names(movies)
 
 def test_movies_to_fetch_skips_up_to_date_details(movies):
-    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": None}}   # null counts as up to date
+    cache = {boxdlist.movie_key(movies[0]): {"imdb_id": None, "poster_path": None}} # null counts as up to date
     result = boxdlist.movies_to_fetch(movies, cache, set())
     assert "Amélie" not in names(result)
 
@@ -4287,3 +4292,620 @@ def test_refresh_keeps_the_selection(app, movies, monkeypatch):
     selected = [app.table.item(r, "values")[0] for r in app.table.selection()]
     assert selected == ["Blade Runner"]
     assert app._refresh_job is None
+    
+# ---------- fetch_poster ----------
+def test_fetch_poster_returns_the_image_bytes(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        fake_urlopen(b"image-bytes"))
+    assert boxdlist.fetch_poster("/abc123.jpg") == b"image-bytes"
+
+def test_fetch_poster_asks_for_the_right_address(monkeypatch):
+    seen = capture_urls(monkeypatch, b"image-bytes")
+    boxdlist.fetch_poster("/abc123.jpg")
+    # base address + size + the path that the proxy sent
+    assert seen == [boxdlist.POSTER_URL + "/abc123.jpg"]
+    assert seen[0].endswith("/w185/abc123.jpg")
+
+@pytest.mark.parametrize("poster_path", [
+    None,           # the film has no poster
+    "",             # empty text
+    "abc.jpg",      # no "/" at the start
+    123,            # not even text
+    ["/a.jpg"],     # a list instead of text
+])
+def test_fetch_poster_invalid_path_returns_none_without_a_request(monkeypatch, poster_path):
+    seen = capture_urls(monkeypatch)
+    assert boxdlist.fetch_poster(poster_path) is None
+    assert seen == []   # no point in asking the network
+
+def test_fetch_poster_network_error_returns_none(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        raises(OSError("no internet")))
+    assert boxdlist.fetch_poster("/abc123.jpg") is None
+
+def test_fetch_poster_http_error_returns_none(monkeypatch):
+    # HTTPError is a kind of OSError, so a 404 is covered too
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        raises(http_error(404)))
+    assert boxdlist.fetch_poster("/abc123.jpg") is None
+
+def test_fetch_poster_strange_address_returns_none(monkeypatch):
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen",
+                        raises(ValueError("bad url")))
+    assert boxdlist.fetch_poster("/abc123.jpg") is None
+
+def test_fetch_poster_empty_answer_returns_none(monkeypatch):
+    # an empty answer is not an image
+    monkeypatch.setattr(boxdlist.urllib.request, "urlopen", fake_urlopen(b""))
+    assert boxdlist.fetch_poster("/abc123.jpg") is None
+
+# ---------- request_poster ----------
+def test_request_poster_starts_a_thread(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.request_poster(movies[0], {"poster_path": "/a.jpg"})
+    assert len(started) == 1
+    assert started[0].target == app._poster_worker
+    assert started[0].args == (movies[0], "/a.jpg")
+    # the film is now marked as on its way
+    assert boxdlist.movie_key(movies[0]) in app.posters_inflight
+
+def test_request_poster_skips_a_poster_that_is_already_here(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.posters[boxdlist.movie_key(movies[0])] = b"x"
+    app.request_poster(movies[0], {"poster_path": "/a.jpg"})
+    assert started == []
+
+def test_request_poster_skips_a_poster_already_on_its_way(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.posters_inflight.add(boxdlist.movie_key(movies[0]))
+    app.request_poster(movies[0], {"poster_path": "/a.jpg"})
+    assert started == []
+
+def test_request_poster_skips_a_poster_that_failed(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.posters_failed.add(boxdlist.movie_key(movies[0]))
+    app.request_poster(movies[0], {"poster_path": "/a.jpg"})
+    assert started == []
+
+@pytest.mark.parametrize("details", [
+    {"poster_path": None},    # TMDB has no poster for this film
+    {},                       # details saved before the proxy sent poster_path
+    {"poster_path": 123},     # not even text
+])
+def test_request_poster_without_a_valid_path_asks_for_nothing(app, movies, monkeypatch, details):
+    started = fake_threads(monkeypatch)
+    app.request_poster(movies[0], details)
+    assert started == []
+    # it must not stay marked as "on its way" forever
+    assert boxdlist.movie_key(movies[0]) not in app.posters_inflight
+
+def test_request_poster_does_not_ask_twice(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.request_poster(movies[0], {"poster_path": "/a.jpg"})
+    app.request_poster(movies[0], {"poster_path": "/a.jpg"})   # the first one is still running
+    assert len(started) == 1
+    
+# ---------- _poster_worker ----------
+def test_poster_worker_hands_the_result_to_the_main_thread(app, movies, monkeypatch):
+    asked = []
+    def fake_fetch(poster_path):
+        asked.append(poster_path)
+        return b"image-bytes"
+    monkeypatch.setattr(boxdlist, "fetch_poster", fake_fetch)
+    scheduled = []
+    # capture after() instead of waiting for Tk to run it
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append((ms, func, args)))
+    app._poster_worker(movies[0], "/a.jpg")
+    assert asked == ["/a.jpg"]
+    assert scheduled == [(0, app._on_poster_result, (movies[0], b"image-bytes"))]
+
+def test_poster_worker_passes_failures_on(app, movies, monkeypatch):
+    monkeypatch.setattr(boxdlist, "fetch_poster", lambda poster_path: None)
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append(args))
+    app._poster_worker(movies[0], "/a.jpg")
+    assert scheduled == [(movies[0], None)]
+
+@pytest.mark.parametrize("error", [RuntimeError, tk.TclError])
+def test_poster_worker_ignores_a_closed_window(app, movies, monkeypatch, error):
+    monkeypatch.setattr(boxdlist, "fetch_poster", lambda poster_path: b"x")
+    def window_is_gone(*args, **kwargs):
+        raise error("window closed")
+    monkeypatch.setattr(app, "after", window_is_gone)
+    app._poster_worker(movies[0], "/a.jpg")   # must not raise
+    
+# ---------- _on_poster_result ----------
+def test_poster_result_stores_the_image(app, movies):
+    app._on_poster_result(movies[0], b"image-bytes")
+    assert app.posters[boxdlist.movie_key(movies[0])] == b"image-bytes"
+
+def test_poster_result_takes_the_movie_off_the_waiting_list(app, movies):
+    key = boxdlist.movie_key(movies[0])
+    app.posters_inflight.add(key)
+    app._on_poster_result(movies[0], b"image-bytes")
+    assert key not in app.posters_inflight
+
+def test_poster_result_failure_marks_the_movie_as_failed(app, movies):
+    key = boxdlist.movie_key(movies[0])
+    app.posters_inflight.add(key)
+    app._on_poster_result(movies[0], None)
+    assert key in app.posters_failed
+    assert key not in app.posters_inflight
+    assert app.posters == {}   # nothing is stored for a failure
+
+def test_poster_result_empty_answer_counts_as_a_failure(app, movies):
+    app._on_poster_result(movies[0], b"")
+    assert boxdlist.movie_key(movies[0]) in app.posters_failed
+    assert app.posters == {}
+
+def test_poster_result_without_a_waiting_entry_does_not_crash(app, movies):
+    # the movie was never marked as on its way: discard must stay silent
+    app._on_poster_result(movies[0], b"image-bytes")
+    assert boxdlist.movie_key(movies[0]) not in app.posters_inflight
+
+def test_poster_result_keeps_the_other_posters(app, movies):
+    app.posters[boxdlist.movie_key(movies[1])] = b"other"
+    app._on_poster_result(movies[0], b"image-bytes")
+    assert app.posters[boxdlist.movie_key(movies[1])] == b"other"
+    
+# ---------- poster requested when a movie is selected ----------
+def details_with_poster(app, movie_item, poster_path="/a.jpg"):
+    # puts up to date details (with a poster path) in the cache
+    app.details_cache[boxdlist.movie_key(movie_item)] = {
+        **DETAILS, "imdb_id": "tt0000001", "poster_path": poster_path}
+
+def test_selecting_a_cached_movie_asks_for_its_poster(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    details_with_poster(app, app.visible[0])
+    select_row(app, "0")
+    assert len(started) == 1
+    assert started[0].target == app._poster_worker
+    assert started[0].args == (app.visible[0], "/a.jpg")
+
+def test_selecting_a_movie_without_poster_asks_for_nothing(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    details_with_poster(app, app.visible[0], poster_path=None)
+    select_row(app, "0")
+    assert started == []
+
+def test_selecting_a_movie_with_a_poster_already_here_asks_for_nothing(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    details_with_poster(app, app.visible[0])
+    app.posters[boxdlist.movie_key(app.visible[0])] = b"x"
+    select_row(app, "0")
+    assert started == []
+
+def test_selecting_a_movie_without_details_asks_only_for_the_details(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    # the poster path is only known after the details arrive
+    assert [t.target for t in started] == [app._details_worker]
+
+def test_a_new_selection_retries_a_failed_poster(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    details_with_poster(app, app.visible[0])
+    key = boxdlist.movie_key(app.visible[0])
+    app.posters_failed.add(key)
+    select_row(app, "0")
+    assert key not in app.posters_failed
+    assert len(started) == 1
+    assert started[0].target == app._poster_worker
+
+def test_selecting_several_movies_asks_for_no_posters(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40)
+    app.set_movies(movies)
+    details_with_poster(app, app.visible[0])
+    details_with_poster(app, app.visible[1])
+    select_two(app)
+    assert started == []
+    
+# ---------- poster requested when the details arrive ----------
+def targets(started):
+    # which functions the fake threads were going to run
+    return [t.target for t in started]
+
+def test_details_arriving_ask_for_the_poster(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")   # no details yet, so only the details request starts
+    app._on_details_result(app.visible[0], {**DETAILS, "poster_path": "/a.jpg"})
+    assert targets(started) == [app._details_worker, app._poster_worker]
+    assert started[1].args == (app.visible[0], "/a.jpg")
+
+def test_late_details_do_not_ask_for_the_poster(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "1")   # the user is now looking at another movie
+    app._on_details_result(app.visible[0], {**DETAILS, "poster_path": "/a.jpg"})
+    assert targets(started) == [app._details_worker]   # only the one from the selection
+
+def test_prefetch_results_do_not_ask_for_posters(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    app.prefetch_total = 5   # more answers are still coming
+    app.prefetch_done = 0
+    # nothing is selected, like when a CSV was just imported
+    for m in movies:
+        app._on_prefetch_result(m, {**DETAILS, "poster_path": "/a.jpg"})
+    assert started == []
+
+def test_failed_details_do_not_ask_for_the_poster(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], None)
+    assert targets(started) == [app._details_worker]
+
+def test_not_found_details_do_not_ask_for_the_poster(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], dict(boxdlist.NOT_FOUND))
+    assert targets(started) == [app._details_worker]
+
+def test_details_without_a_poster_do_not_ask_for_it(app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")
+    app._on_details_result(app.visible[0], {**DETAILS, "poster_path": None})
+    assert targets(started) == [app._details_worker]
+
+def test_details_arriving_with_several_movies_selected_ask_for_no_poster(
+        app, movies, monkeypatch):
+    started = fake_threads(monkeypatch)
+    set_space(app, monkeypatch, lines=40)
+    app.set_movies(movies)
+    select_two(app)
+    app._on_details_result(app.visible[0], {**DETAILS, "poster_path": "/a.jpg"})
+    assert app._poster_worker not in targets(started)
+    
+# ---------- load_poster_image ----------
+def make_png(width=100, height=150, mode="RGB"):
+    # a small real image, so the tests do not need a file
+    buffer = io.BytesIO()
+    boxdlist.Image.new(mode, (width, height), "red").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+def test_load_poster_image_scales_to_the_width_and_keeps_the_ratio():
+    image = boxdlist.load_poster_image(make_png(100, 150), 50)
+    assert image.size == (50, 75)
+
+def test_load_poster_image_gives_an_rgb_image():
+    # a PNG with transparency must still become a plain RGB image
+    image = boxdlist.load_poster_image(make_png(mode="RGBA"), 50)
+    assert image.mode == "RGB"
+
+@pytest.mark.parametrize("data", [b"", b"this is not an image", make_png()[:20]])
+def test_load_poster_image_broken_data_returns_none(data):
+    assert boxdlist.load_poster_image(data, 50) is None
+
+# ---------- poster in the panel ----------
+def manager(widget):
+    # "pack" when the widget is on the screen, "" when it is not
+    return widget.winfo_manager()
+
+def select_with_poster(app, monkeypatch, poster_in_memory=False):
+    # selects a movie that has details and a poster path
+    fake_threads(monkeypatch)
+    app.set_movies(movies_for_poster())
+    details_with_poster(app, app.visible[0])
+    if poster_in_memory:
+        app.posters[boxdlist.movie_key(app.visible[0])] = make_png()
+    select_row(app, "0")
+    return app.visible[0]
+
+def movies_for_poster():
+    return [movie("Amélie", "2001"), movie("Blade Runner", "1982")]
+
+def test_poster_in_memory_is_shown_in_the_panel(app, monkeypatch):
+    select_with_poster(app, monkeypatch, poster_in_memory=True)
+    assert manager(app.poster_label) == "pack"
+    assert manager(app.poster_bar) == ""
+    assert app.poster_photo is not None   # the reference that keeps the image alive
+
+def test_grey_block_shows_while_the_poster_loads(app, monkeypatch):
+    select_with_poster(app, monkeypatch)
+    assert manager(app.poster_bar) == "pack"
+    assert manager(app.poster_label) == ""
+    assert app._pulse_job is not None
+
+def test_poster_arriving_swaps_the_block_for_the_image(app, monkeypatch):
+    item = select_with_poster(app, monkeypatch)
+    app._on_poster_result(item, make_png())
+    assert manager(app.poster_label) == "pack"
+    assert manager(app.poster_bar) == ""
+    assert app._pulse_job is None   # nothing is loading anymore
+
+def test_failed_poster_removes_the_block(app, monkeypatch):
+    item = select_with_poster(app, monkeypatch)
+    app._on_poster_result(item, None)
+    assert manager(app.poster_label) == ""
+    assert manager(app.poster_bar) == ""
+    assert app._pulse_job is None
+
+def test_broken_poster_data_shows_nothing_and_does_not_crash(app, monkeypatch):
+    item = select_with_poster(app, monkeypatch)
+    app._on_poster_result(item, b"this is not an image")
+    assert manager(app.poster_label) == ""
+    assert manager(app.poster_bar) == ""
+
+def test_movie_without_poster_shows_nothing(app, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies_for_poster())
+    details_with_poster(app, app.visible[0], poster_path=None)
+    select_row(app, "0")
+    assert manager(app.poster_label) == ""
+    assert manager(app.poster_bar) == ""
+
+def test_late_poster_does_not_touch_the_panel(app, monkeypatch):
+    item = select_with_poster(app, monkeypatch)
+    select_row(app, "1")   # the user moved to another movie
+    app._on_poster_result(item, make_png())
+    assert manager(app.poster_label) == ""
+    # but the image is kept, so going back is instant
+    assert boxdlist.movie_key(item) in app.posters
+
+def test_selecting_another_movie_hides_the_old_poster(app, monkeypatch):
+    select_with_poster(app, monkeypatch, poster_in_memory=True)
+    select_row(app, "1")   # no details yet, so the skeleton shows
+    assert manager(app.poster_label) == ""
+    assert manager(app.poster_bar) == ""
+
+def test_deselecting_hides_the_poster(app, monkeypatch):
+    select_with_poster(app, monkeypatch, poster_in_memory=True)
+    app.clear_selection()
+    app.on_select()
+    assert manager(app.poster_label) == ""
+
+def test_going_back_to_a_movie_shows_its_poster_without_a_request(app, monkeypatch):
+    item = select_with_poster(app, monkeypatch, poster_in_memory=True)
+    select_row(app, "1")
+    started = fake_threads(monkeypatch)
+    select_row(app, "0")
+    assert manager(app.poster_label) == "pack"
+    assert started == []   # the poster was already in memory
+
+# ---------- the pulse and the poster block ----------
+def test_stop_pulse_if_idle_stops_when_nothing_is_loading(app):
+    app.start_pulse()
+    app.stop_pulse_if_idle()
+    assert app._pulse_job is None
+
+def test_stop_pulse_if_idle_keeps_going_while_the_text_skeleton_shows(
+        app, movies, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies)
+    select_row(app, "0")   # no details, so the text skeleton is on the screen
+    app.stop_pulse_if_idle()
+    assert app._pulse_job is not None
+
+def test_poster_arriving_keeps_the_pulse_while_the_rating_is_pending(app, monkeypatch):
+    fake_threads(monkeypatch)
+    app.set_movies(movies_for_poster())
+    details_with_poster(app, app.visible[0])
+    app.ratings_downloading = True   # the rating bar is on the screen
+    select_row(app, "0")
+    app._on_poster_result(app.visible[0], make_png())
+    assert manager(app.rating_bar) == "pack"
+    assert app._pulse_job is not None   # the rating bar still needs to pulse
+
+def test_poster_block_is_painted_by_the_pulse(app):
+    app._pulse_phase = 0.5 - boxdlist.PULSE_MS / boxdlist.PULSE_CYCLE_MS
+    app._pulse_tick()
+    assert app.poster_bar.cget("bg").lower() == boxdlist.SCROLL.lower()
+    
+# ---------- load_poster_image with a maximum height ----------
+def test_load_poster_image_without_a_max_height_is_unchanged():
+    assert boxdlist.load_poster_image(make_png(100, 150), 50).size == (50, 75)
+
+def test_load_poster_image_shrinks_to_the_max_height_and_keeps_the_ratio():
+    # 50 wide would be 75 high, but only 50 fit: the width follows (100:150 = 33:50)
+    assert boxdlist.load_poster_image(make_png(100, 150), 50, 50).size == (33, 50)
+
+def test_load_poster_image_big_max_height_changes_nothing():
+    assert boxdlist.load_poster_image(make_png(100, 150), 50, 500).size == (50, 75)
+
+def test_load_poster_image_max_height_zero_never_gives_an_empty_image():
+    # a size of 0 would crash, so the minimum is 1x1
+    assert boxdlist.load_poster_image(make_png(100, 150), 50, 0).size == (1, 1)
+
+# ---------- the whole synopsis is remembered ----------
+def test_show_details_remembers_the_whole_synopsis(app):
+    app.show_details(movie("Amélie", "2001"), {**DETAILS, "overview": "  A story.  "})
+    assert app.overview_full == "A story."
+
+def test_show_details_without_synopsis_remembers_the_fallback_text(app):
+    app.show_details(movie("Amélie", "2001"), None)
+    assert app.overview_full == "No synopsis available."
+
+def test_show_message_remembers_its_text(app):
+    app.show_message(movie("Amélie", "2001"), "Loading...")
+    assert app.overview_full == "Loading..."
+
+def test_clear_details_forgets_the_synopsis(app):
+    app.show_details(movie("Amélie", "2001"), DETAILS)
+    app.clear_details()
+    assert app.overview_full == ""
+
+# ---------- panel_free_height ----------
+def test_panel_free_height_without_a_size_returns_none(app, monkeypatch):
+    monkeypatch.setattr(app.single_view, "winfo_height", lambda: 1)
+    assert app.panel_free_height() is None
+
+def test_panel_free_height_subtracts_the_other_labels_and_the_margin(app, monkeypatch):
+    def part(height):
+        # looks like a widget that asks for 'height' pixels
+        return SimpleNamespace(winfo_reqheight=lambda: height)
+    monkeypatch.setattr(app.single_view, "winfo_height", lambda: 400)
+    # the synopsis and the poster must not be counted, they are what we are fitting
+    monkeypatch.setattr(app.single_view, "pack_slaves",
+                        lambda: [part(50), part(30), app.details_overview,
+                                 app.poster_label, app.poster_bar])
+    assert app.panel_free_height() == 400 - 80 - app.px(boxdlist.PANEL_MARGIN)
+
+# ---------- fit_overview ----------
+def fake_text_height(app, monkeypatch):
+    # one pixel per character, so the tests do not depend on the font
+    monkeypatch.setattr(app.details_overview, "winfo_reqheight",
+                        lambda: len(app.details_overview.cget("text")))
+
+def test_fit_overview_without_a_limit_shows_the_whole_text(app, monkeypatch):
+    fake_text_height(app, monkeypatch)
+    app.overview_full = "word " * 40
+    app.fit_overview(None)
+    assert app.details_overview.cget("text") == "word " * 40
+
+def test_fit_overview_keeps_the_text_when_it_fits(app, monkeypatch):
+    fake_text_height(app, monkeypatch)
+    app.overview_full = "A short story."
+    app.fit_overview(1000)
+    assert app.details_overview.cget("text") == "A short story."
+
+def test_fit_overview_cuts_a_long_text_with_dots(app, monkeypatch):
+    fake_text_height(app, monkeypatch)
+    app.overview_full = "word " * 40   # 200 characters
+    app.fit_overview(50)
+    shown = app.details_overview.cget("text")
+    assert shown.endswith("...")
+    assert shown.startswith("word")
+    assert len(shown) <= 50
+
+def test_fit_overview_gives_the_whole_text_back_when_there_is_more_room(app, monkeypatch):
+    # like making the window taller again
+    fake_text_height(app, monkeypatch)
+    app.overview_full = "word " * 40
+    app.fit_overview(50)
+    app.fit_overview(1000)
+    assert app.details_overview.cget("text") == "word " * 40
+
+def test_fit_overview_with_no_room_at_all_does_not_crash(app, monkeypatch):
+    fake_text_height(app, monkeypatch)
+    app.overview_full = "word " * 40
+    app.fit_overview(0)
+    assert app.details_overview.cget("text") == "..."
+
+def test_fit_overview_with_an_empty_text_does_nothing(app, monkeypatch):
+    fake_text_height(app, monkeypatch)
+    app.overview_full = ""
+    app.fit_overview(10)
+    assert app.details_overview.cget("text") == ""
+
+# ---------- the poster follows the size of the panel ----------
+def fake_panel(app, monkeypatch, free, text_height):
+    # a movie that is selected, with a panel that has 'free' pixels for the
+    # synopsis and the poster, and a whole synopsis that needs 'text_height'
+    item = movie("Amélie", "2001")
+    app.details_target = item
+    app.overview_full = "A story and a little more."
+    monkeypatch.setattr(app, "panel_free_height", lambda: free)
+    monkeypatch.setattr(app.details_overview, "winfo_reqheight", lambda: text_height)
+    return item
+
+def test_poster_takes_what_is_left_when_the_whole_text_fits(app, monkeypatch):
+    free, text_height = app.px(300), app.px(100)
+    item = fake_panel(app, monkeypatch, free, text_height)
+    app.posters[boxdlist.movie_key(item)] = make_png()
+    app.update_poster(item)
+    assert app.poster_photo.height() == free - text_height
+    assert app.details_overview.cget("text") == "A story and a little more."   # not cut
+
+def test_poster_gets_a_minimum_and_the_text_is_cut_when_space_is_tight(app, monkeypatch):
+    free, text_height = app.px(90), app.px(300)
+    item = fake_panel(app, monkeypatch, free, text_height)
+    app.posters[boxdlist.movie_key(item)] = make_png()
+    app.update_poster(item)
+    assert app.poster_photo.height() == app.px(boxdlist.POSTER_MIN_HEIGHT)
+    assert app.details_overview.cget("text").endswith("...")   # the text gave way
+
+def test_poster_is_hidden_when_not_even_one_line_of_text_would_fit(app, monkeypatch):
+    item = fake_panel(app, monkeypatch, app.px(30), app.px(300))
+    app.posters[boxdlist.movie_key(item)] = make_png()
+    app.update_poster(item)
+    assert app.poster_label.winfo_manager() == ""
+    assert app.poster_bar.winfo_manager() == ""
+
+def test_grey_block_has_the_shape_of_a_poster_and_fits_the_room(app, monkeypatch):
+    free, text_height = app.px(300), app.px(100)
+    item = fake_panel(app, monkeypatch, free, text_height)
+    app.posters_inflight.add(boxdlist.movie_key(item))
+    app.update_poster(item)
+    height = free - text_height
+    assert app.poster_bar.winfo_manager() == "pack"
+    assert int(str(app.poster_bar.cget("height"))) == height
+    assert int(str(app.poster_bar.cget("width"))) == round(height / 1.5)   # 2:3 like a poster
+
+def test_update_poster_ignores_a_movie_that_is_not_selected(app, monkeypatch):
+    item = fake_panel(app, monkeypatch, app.px(300), app.px(100))
+    app.details_target = movie("Other", "1999")   # the user moved on
+    app.posters[boxdlist.movie_key(item)] = make_png()
+    app.update_poster(item)
+    assert app.poster_label.winfo_manager() == ""
+
+# ---------- refitting when the window changes size ----------
+def test_panel_listens_to_the_window_size(app):
+    assert app.single_view.bind("<Configure>") != ""
+
+def test_schedule_fit_waits_a_moment(app, monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(app, "after",
+                        lambda ms, func, *args: scheduled.append((ms, func)) or "job")
+    app._fit_job = None
+    app.schedule_fit()
+    assert scheduled == [(100, app.refit_panel)]
+    app._fit_job = None   # the window is shared, so leave it clean
+
+def test_schedule_fit_twice_keeps_only_the_last_timer(app, monkeypatch):
+    jobs = iter(["job-1", "job-2"])
+    cancelled = []
+    monkeypatch.setattr(app, "after", lambda ms, func, *args: next(jobs))
+    monkeypatch.setattr(app, "after_cancel", lambda job: cancelled.append(job))
+    app._fit_job = None
+    app.schedule_fit()
+    app.schedule_fit()   # the window is still being dragged
+    assert cancelled == ["job-1"]
+    assert app._fit_job == "job-2"
+    app._fit_job = None
+
+def test_refit_panel_redraws_the_selected_movie(app, monkeypatch):
+    item = movie("Amélie", "2001")
+    app.details_target = item
+    app._fit_job = "job"
+    called = []
+    monkeypatch.setattr(app, "update_poster", lambda m: called.append(m))
+    app.refit_panel()
+    assert called == [item]
+    assert app._fit_job is None
+
+def test_refit_panel_with_nothing_selected_does_nothing(app, monkeypatch):
+    called = []
+    monkeypatch.setattr(app, "update_poster", lambda m: called.append(m))
+    app.refit_panel()
+    assert called == []
+
+def test_on_close_cancels_the_pending_refit(app, monkeypatch):
+    monkeypatch.setattr(boxdlist, "read_config", lambda: {})
+    monkeypatch.setattr(boxdlist, "write_config", lambda data: None)
+    monkeypatch.setattr(app, "destroy", lambda: None)
+    cancelled = []
+    monkeypatch.setattr(app, "after_cancel", lambda job: cancelled.append(job))
+    app._fit_job = "job"
+    app.on_close()
+    assert "job" in cancelled
+    app._fit_job = None
+
+# ---------- the bottom bar never disappears ----------
+def test_bottom_bar_is_packed_before_the_table(app):
+    bottom = app.random_button.master   # the frame that holds the buttons
+    middle = app.table.master
+    order = app.pack_slaves()
+    # a small window takes space from the table, never from the buttons
+    assert order.index(bottom) < order.index(middle)
+    assert bottom.pack_info()["side"] == "bottom"
