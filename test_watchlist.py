@@ -4909,3 +4909,54 @@ def test_bottom_bar_is_packed_before_the_table(app):
     # a small window takes space from the table, never from the buttons
     assert order.index(bottom) < order.index(middle)
     assert bottom.pack_info()["side"] == "bottom"
+    
+# ---------- genre filter: match any ----------
+def test_filter_by_details_match_any_genre(movies):
+    # Amélie has Comedy, Cidade de Deus has Drama, nobody has both
+    result = boxdlist.filter_by_details(movies, genre_cache(movies),
+                                        ["Comedy", "Drama"], match_any=True)
+    assert names(result) == ["Amélie", "Cidade de Deus"]
+
+def test_filter_by_details_match_all_is_still_the_default(movies):
+    result = boxdlist.filter_by_details(movies, genre_cache(movies), ["Comedy", "Drama"])
+    assert result == []
+
+def test_filter_by_details_match_any_with_one_genre_is_the_same_as_all(movies):
+    cache = genre_cache(movies)
+    assert (boxdlist.filter_by_details(movies, cache, ["Drama"], match_any=True)
+            == boxdlist.filter_by_details(movies, cache, ["Drama"]))
+
+def test_filter_by_details_match_any_without_genres_keeps_everything(movies):
+    result = boxdlist.filter_by_details(movies, genre_cache(movies), [], match_any=True)
+    assert result == movies
+
+def test_filter_by_details_match_any_hides_movies_without_details(movies):
+    result = boxdlist.filter_by_details(movies, genre_cache(movies),
+                                        ["Comedy", "Drama"], match_any=True)
+    assert "No Year" not in names(result)
+
+def test_filter_by_details_match_any_combines_with_runtime(movies):
+    # Comedy (90 min) or Drama (120 min), but only up to 100 minutes
+    result = boxdlist.filter_by_details(movies, runtime_cache(movies),
+                                        ["Comedy", "Drama"], runtime_max=100,
+                                        match_any=True)
+    assert names(result) == ["Amélie"]
+
+def test_match_any_genre_changes_the_table(app, movies):
+    app.set_movies(movies)
+    details_for_ui(app, movies)   # Amélie is Comedy, Blade Runner is Science Fiction
+    app.genre_vars["Comedy"] = tk.BooleanVar(value=True)
+    app.genre_vars["Science Fiction"] = tk.BooleanVar(value=True)
+    app.update_list()
+    assert table_names(app) == []   # nobody has both
+    app.genre_any.set(True)
+    app.update_list()
+    assert table_names(app) == ["Amélie", "Blade Runner"]
+    app.genre_vars.clear()   # the window is shared, so leave it clean
+    app.genre_any.set(False)
+
+def test_clear_filters_resets_match_any(app, movies):
+    app.set_movies(movies)
+    app.genre_any.set(True)
+    app.clear_filters()
+    assert app.genre_any.get() is False

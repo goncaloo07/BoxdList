@@ -52,7 +52,7 @@ DETAILS_WIDTH = 260
 DEFAULT_SIZE = f"{760 + DETAILS_WIDTH}x600"
 VALID_SIZE = re.compile(r"\d{3,4}x\d{3,4}(\+-?\d+\+-?\d+)?")
 MIN_VISIBLE = 200
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 RELEASES_API = "https://api.github.com/repos/goncaloo07/BoxdList/releases/latest"
 DETAILS_API = "https://boxdlist-proxy.vercel.app/api/movie"
 POSTER_URL = "https://image.tmdb.org/t/p/w185"
@@ -735,9 +735,12 @@ def filter_by_details(movies: list[dict], cache: dict,
                       runtime_max: int | None = None,
                       ratings: dict | None = None,
                       rating_min: float | None = None,
-                      rating_max: float | None = None) -> list[dict]:
-    """Keeps only the movies that match the chosen genres, runtime and rating limits."""
-    # no genres chosen: the filter is off, so everything passes
+                      rating_max: float | None = None,
+                      match_any: bool = False) -> list[dict]:
+    """Keeps only the movies that match the chosen genres, runtime and rating limits.
+    match_any=False needs every chosen genre, match_any=True needs at least one.
+    """
+    # no filter chosen: everything passes
     if not genres and runtime_min is None and runtime_max is None and rating_max is None and rating_min is None:
         return list(movies)
     wanted = set(genres)
@@ -745,25 +748,31 @@ def filter_by_details(movies: list[dict], cache: dict,
     result = []
     for m in movies:
         details = cache.get(movie_key(m))
-        # a movie without details has no genres, so it is hidden
-        if wanted <= set(movie_genres(details)):  
-            if runtime_min is not None or runtime_max is not None:
-                runtime = movie_runtime(details)
-                if runtime is None: 
-                   continue
-                if runtime_min is not None and runtime < runtime_min:
-                    continue
-                if runtime_max is not None and runtime > runtime_max:
-                    continue
-            if rating_min is not None or rating_max is not None:
-                rating = movie_rating(details, ratings)
-                if rating is None: 
-                    continue
-                if rating_min is not None and rating < rating_min:
-                    continue
-                if rating_max is not None and rating > rating_max:
-                    continue
-            result.append(m) 
+        have = set(movie_genres(details))
+        # with no genres chosen, "wanted <= have" is always True, so the genre check is skipped
+        if wanted and match_any:
+            genre_ok = not wanted.isdisjoint(have)   # at least one genre in common
+        else:
+            genre_ok = wanted <= have                # every chosen genre is there
+        if not genre_ok:
+            continue
+        if runtime_min is not None or runtime_max is not None:
+            runtime = movie_runtime(details)
+            if runtime is None:
+                continue
+            if runtime_min is not None and runtime < runtime_min:
+                continue
+            if runtime_max is not None and runtime > runtime_max:
+                continue
+        if rating_min is not None or rating_max is not None:
+            rating = movie_rating(details, ratings)
+            if rating is None:
+                continue
+            if rating_min is not None and rating < rating_min:
+                continue
+            if rating_max is not None and rating > rating_max:
+                continue
+        result.append(m)
     return result
     
 # ---------- Configuration (remember the last CSV) ----------
@@ -1054,6 +1063,10 @@ class App(TkinterDnD.Tk):
                                 postcommand=self.update_genre_menu)   # runs before it opens
         self.genre_button["menu"] = self.genre_menu
         self.genre_button.pack(side="left")
+        # Checked: a movie needs only one of the chosen genres. Unchecked: it needs all of them
+        self.genre_any = tk.BooleanVar(value=False)
+        ttk.Checkbutton(more_filters, text="Any", variable=self.genre_any,
+                        command=self.update_list).pack(side="left", padx=(self.px(8), 0))
         # Chips: one small label per chosen genre, click one to remove it
         self.genre_chips = ttk.Frame(more_filters)
         self.genre_chips.pack(side="left", padx=(self.px(6), 0))
@@ -1638,6 +1651,7 @@ class App(TkinterDnD.Tk):
         self.rating_max.set("")
         for var in self.genre_vars.values():
             var.set(False)
+        self.genre_any.set(False)   # back to "all genres"
         self.draw_genre_chips()
         self.update_list()
 
@@ -1673,9 +1687,11 @@ class App(TkinterDnD.Tk):
             parse_number(self.runtime_min.get()), parse_number(self.runtime_max.get()))
         rating_low, rating_high = (None, None) if rating_error else (
             parse_number(self.rating_min.get()), parse_number(self.rating_max.get()))
+        # match_any: True keeps films with at least one chosen genre, False needs all of them
         filtered = filter_by_details(filtered, self.details_cache, self.selected_genres(),
-                                    runtime_low, runtime_high,
-                                    self.ratings, rating_low, rating_high)
+                                     runtime_low, runtime_high,
+                                     self.ratings, rating_low, rating_high,
+                                     match_any=self.genre_any.get())
         self.visible = sort_movies(
             filtered, self.sort_column, self.reverse_order)
         if not any(m is self.last_randomized for m in self.visible):
@@ -1686,7 +1702,7 @@ class App(TkinterDnD.Tk):
         for i, f in enumerate(self.visible):
             # Even rows are plain, odd rows are slightly lighter
             tag = "odd" if i % 2 else "even"
-            self.table.insert("", "end", iid=str(i), tags=(tag,),   
+            self.table.insert("", "end", iid=str(i), tags=(tag,),
                               values=(f["name"], f["year"] or EMPTY, f["date"] or EMPTY))
 
         self.update_counter()

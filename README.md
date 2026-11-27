@@ -15,6 +15,7 @@ Import the CSV exported from Letterboxd and see your whole watchlist in one tabl
 - Remembers the window size, its position and the sort order
 - Random pick from the films currently shown, never repeating the previous one
 - Select a film to see its genres, runtime, synopsis and IMDb rating. After you import, the details are fetched in the background and saved on your computer, so they load instantly next time
+- Genre filter with an "Any" option: show films that have at least one of the chosen genres, instead of all of them
 - The film poster shows above the synopsis. It grows or shrinks with the window, and it hides when there is no room left, so the text always fits
 - Select several films (drag, `Ctrl+click` or `Shift+click`) to see a list that fits the available space: as many films as possible with their details and IMDb rating, or just the names when there is little room
 - `Enter` and `Delete` work on all the selected films at once
